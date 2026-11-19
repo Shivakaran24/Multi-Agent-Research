@@ -221,6 +221,7 @@ class RunSummary(BaseModel):
     updated_at: str
     feedback: int | None = Field(default=None, description="1 = helpful, -1 = not helpful")
     share_token: str | None = Field(default=None, description="Present while a read-only link is active")
+    tokens_used: int = Field(default=0, description="Model tokens spent on this run")
 
 
 class SharedReport(BaseModel):
@@ -239,6 +240,7 @@ class Usage(BaseModel):
     used_today: int
     daily_limit: int | None = Field(description="Runs allowed per rolling 24 hours; null when unlimited")
     default_iterations: int
+    tokens_today: int = Field(default=0, description="Model tokens spent in the last 24 hours")
 
 
 class RunList(BaseModel):

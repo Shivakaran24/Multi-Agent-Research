@@ -38,6 +38,7 @@ from research_assistant.auth import (
 )
 from research_assistant.config import Settings
 from research_assistant.followup import answer_followup
+from research_assistant.usage import UsageTracker
 from research_assistant.graph import build_research_graph
 from research_assistant.schemas import ResearchQuestion, RunDetail, RunList, SharedReport
 
@@ -647,13 +648,20 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
             if user_id is not None:
                 app.state.user_active[user_id] = app.state.user_active.get(user_id, 0) + 1
             app.state.active_threads.add(thread_id)
+            tracker = UsageTracker()
+            tracked = {**config, "callbacks": [*(config.get("callbacks") or []), tracker]}
             try:
                 if status_on_start:
                     await save(status=status_on_start)
-                async for event in _stream_graph(graph, graph_input, config, thread_id):
+                async for event in _stream_graph(graph, graph_input, tracked, thread_id):
                     await remember(event)
                     yield event
             finally:
+                if user_id is not None and tracker.total:
+                    try:
+                        get_store().add_tokens(thread_id, tracker.total)
+                    except Exception:
+                        logger.exception("Could not save token usage for thread %s", thread_id)
                 semaphore.release()
                 app.state.active_threads.discard(thread_id)
                 if user_id is not None:
@@ -727,17 +735,20 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
         user_id = getattr(request.state, "user_id", None)
         runs: list[dict[str, Any]] = []
         used = 0
+        tokens_today = 0
         if user_id is not None:
             store = get_store()
             runs = [public_run(row) for row in await asyncio.to_thread(store.list_runs, user_id, 50)]
             since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat(timespec="microseconds")
             used = await asyncio.to_thread(store.count_runs_since, user_id, since)
+            tokens_today = await asyncio.to_thread(store.tokens_since, user_id, since)
         return {
             "runs": runs,
             "usage": {
                 "used_today": used,
                 "daily_limit": current.max_runs_per_user_per_day or None,
                 "default_iterations": current.max_iterations,
+                "tokens_today": tokens_today,
             },
         }
 

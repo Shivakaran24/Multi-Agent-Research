@@ -154,7 +154,7 @@ def test_daily_limit_blocks_extra_runs_and_is_reported(tmp_path):
         blocked = client.post("/research/runs", json={"topic": "third topic here"}, headers=auth(token))
         assert blocked.status_code == 429 and "Daily research limit" in blocked.json()["detail"]
         data = runs(client, token)
-        assert data["usage"] == {"used_today": 2, "daily_limit": 2, "default_iterations": 1}
+        assert data["usage"] == {"used_today": 2, "daily_limit": 2, "default_iterations": 1, "tokens_today": 0}
         assert len(data["runs"]) == 2  # the blocked attempt left no ghost entry
         # Another account has its own allowance.
         other = token_for(client, "bob@example.com", "Bob Builder")
@@ -269,3 +269,55 @@ def test_follow_up_failures_and_rate_limit(env, monkeypatch):
     client.app.state.followup_times.clear()
     codes = [client.post(f"/research/runs/{thread_id}/ask", json={"question": "Why?"}, headers=auth(token)).status_code for _ in range(3)]
     assert codes == [200, 200, 429]
+
+
+# ------------------------------------------------------------------ token usage
+
+
+class _Msg:
+    def __init__(self, i, o):
+        self.usage_metadata = {"input_tokens": i, "output_tokens": o}
+
+
+class _Gen:
+    def __init__(self, i, o):
+        self.message = _Msg(i, o)
+
+
+class _Resp:
+    def __init__(self, i, o):
+        self.generations = [[_Gen(i, o)]]
+        self.llm_output = None
+
+
+def test_token_usage_is_saved_per_run_and_totalled_for_today(tmp_path):
+    class TokenGraph(FakeGraph):
+        async def astream(self, graph_input, config, stream_mode="updates"):
+            tracker = next(c for c in config["callbacks"] if hasattr(c, "on_llm_end"))
+            tracker.on_llm_end(_Resp(1000, 250))  # one model call
+            tracker.on_llm_end(_Resp(500, 50))
+            async for item in super().astream(graph_input, config, stream_mode):
+                yield item
+
+    client, _ = make_client(tmp_path, graph=TokenGraph())
+    with client:
+        token = token_for(client)
+        assert runs(client, token)["usage"]["tokens_today"] == 0
+        thread_id, _ = start_run(client, token)
+        assert client.get(f"/research/runs/{thread_id}", headers=auth(token)).json()["tokens_used"] == 1800
+        client.post(f"/research/runs/{thread_id}/resume", json={}, headers=auth(token))  # second segment adds
+        listing = runs(client, token)
+        assert listing["runs"][0]["tokens_used"] == 3600
+        assert listing["usage"]["tokens_today"] == 3600
+
+
+def test_usage_tracker_falls_back_to_llm_output():
+    from research_assistant.usage import UsageTracker
+
+    class Old:
+        generations = [[object()]]
+        llm_output = {"token_usage": {"prompt_tokens": 7, "completion_tokens": 3}}
+
+    tracker = UsageTracker()
+    tracker.on_llm_end(Old())
+    assert tracker.total == 10

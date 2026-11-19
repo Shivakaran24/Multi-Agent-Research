@@ -218,10 +218,11 @@ _MIGRATIONS = (
     ("users", "email_verified", "INTEGER NOT NULL DEFAULT 1"),
     ("research_runs", "feedback", "INTEGER"),
     ("research_runs", "share_token", "TEXT"),
+    ("research_runs", "tokens_used", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 _USER_COLUMNS = "id, email, full_name, password_hash, created_at, token_version, email_verified"
-_RUN_COLUMNS = "thread_id, user_id, topic, title, status, created_at, COALESCE(updated_at, created_at), plan, report, feedback, share_token"
+_RUN_COLUMNS = "thread_id, user_id, topic, title, status, created_at, COALESCE(updated_at, created_at), plan, report, feedback, share_token, tokens_used"
 
 
 class UserStore:
@@ -448,11 +449,11 @@ class UserStore:
 
     @staticmethod
     def _run(row: Any, *, detail: bool) -> dict[str, Any]:
-        thread_id, user_id, topic, title, status, created_at, updated_at, plan, report, feedback, share_token = row
+        thread_id, user_id, topic, title, status, created_at, updated_at, plan, report, feedback, share_token, tokens_used = row
         data: dict[str, Any] = {
             "thread_id": thread_id, "user_id": user_id, "topic": topic, "title": title,
             "status": status, "created_at": created_at, "updated_at": updated_at,
-            "feedback": feedback, "share_token": share_token,
+            "feedback": feedback, "share_token": share_token, "tokens_used": tokens_used or 0,
         }
         if detail:
             data["plan"] = json.loads(plan) if plan else None
@@ -527,6 +528,24 @@ class UserStore:
                 self._sql("SELECT 1 FROM research_runs WHERE thread_id = ? AND user_id = ?"), (thread_id, user_id)
             ).fetchone()
         return row is not None
+
+    def add_tokens(self, thread_id: str, tokens: int) -> None:
+        """Add model tokens spent by a run (a run can be streamed in several parts)."""
+        if tokens <= 0:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                self._sql("UPDATE research_runs SET tokens_used = COALESCE(tokens_used, 0) + ? WHERE thread_id = ?"),
+                (int(tokens), thread_id),
+            )
+
+    def tokens_since(self, user_id: str, since_iso: str) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                self._sql("SELECT COALESCE(SUM(tokens_used), 0) FROM research_runs WHERE user_id = ? AND created_at >= ?"),
+                (user_id, since_iso),
+            ).fetchone()
+        return int(row[0])
 
     def count_runs_since(self, user_id: str, since_iso: str) -> int:
         with self._connect() as conn:

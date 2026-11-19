@@ -2,9 +2,9 @@ import { API, errorMessage } from './auth'
 
 export type RunStatus = 'planning' | 'review' | 'researching' | 'complete' | 'failed' | 'interrupted'
 export type Question = { question: string; rationale: string }
-export type RunSummary = { thread_id: string; topic: string; title: string | null; status: RunStatus; created_at: string; updated_at: string; feedback?: number | null; share_token?: string | null }
+export type RunSummary = { thread_id: string; topic: string; title: string | null; status: RunStatus; created_at: string; updated_at: string; feedback?: number | null; share_token?: string | null; tokens_used?: number }
 export type RunDetail = RunSummary & { plan: Question[] | null; report: string | null }
-export type Usage = { used_today: number; daily_limit: number | null; default_iterations: number }
+export type Usage = { used_today: number; daily_limit: number | null; default_iterations: number; tokens_today?: number }
 export type RunList = { runs: RunSummary[]; usage: Usage }
 
 /** Server limits on the plan editor (schemas.ResearchQuestion). */
@@ -57,3 +57,10 @@ export async function revokeShare(token: string, id: string): Promise<void> {
 }
 
 export const shareUrl = (shareToken: string) => `${window.location.origin}${window.location.pathname}#/shared?token=${shareToken}`
+
+/** 18400 -> "18.4k", 1250000 -> "1.25M". */
+export function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2).replace(/0$/, '')}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, '')}k`
+  return String(n)
+}
