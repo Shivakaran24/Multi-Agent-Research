@@ -370,6 +370,22 @@ def _report_title(report: str) -> str | None:
     return first[2:].strip()[:200] or None if first.startswith("# ") else None
 
 
+class HealthAwareTrustedHostMiddleware(TrustedHostMiddleware):
+    """Host allow-list for everything except the liveness/readiness probes.
+
+    Platform health checks (Render, Kubernetes, load balancers) call the service by its internal
+    address, which can never be on a public hostname allow-list. The probes return no user data.
+    """
+
+    PROBE_PATHS = frozenset({"/healthz", "/readyz"})
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http" and scope.get("path") in self.PROBE_PATHS:
+            await self.app(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
+
+
 def create_app(*, graph: Any | None = None, settings: Settings | None = None) -> FastAPI:
     """Create the API app. A graph can be injected, or initialized lazily on first run."""
     active_settings = settings or Settings()
@@ -493,7 +509,7 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
         return secure_headers(await call_next(request))
 
     # CORS is outermost so even early auth failures retain the correct browser headers.
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=active_settings.allowed_hosts)
+    app.add_middleware(HealthAwareTrustedHostMiddleware, allowed_hosts=active_settings.allowed_hosts)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=active_settings.cors_origins,

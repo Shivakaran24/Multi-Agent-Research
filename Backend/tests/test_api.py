@@ -220,3 +220,12 @@ def test_token_expiry_is_enforced_by_the_clock(client):
     assert client.get("/auth/me", headers=auth(short)).status_code == 200
     time.sleep(2.1)
     assert client.get("/auth/me", headers=auth(short)).status_code == 401
+
+
+def test_health_probes_ignore_host_allow_list_but_api_does_not(tmp_path):
+    client, _ = make_client(tmp_path)
+    internal = {"Host": "10.203.25.104:8000"}  # how platform health checks address the service
+    assert client.get("/healthz", headers=internal).status_code == 200
+    assert client.get("/readyz", headers=internal).status_code == 200
+    assert client.get("/auth/config", headers=internal).status_code == 400
+    assert client.get("/auth/config").status_code == 200
