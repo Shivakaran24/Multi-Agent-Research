@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import VisualContext from './VisualContext'
+import Logo from './Logo'
 import AuthPage from './AuthPage'
 import Account from './Account'
 import { API, errorMessage, useAuth, type Session } from './auth'
@@ -189,7 +190,7 @@ function Workspace({ session }: { session: Session }) {
 
   return <div className="shell">
     <aside className="sidebar">
-      <div className="brand"><span className="brand-mark">f</span><span>fieldwork<span className="brand-dot">.</span></span><span className="workspace-tag">WORKSPACE</span></div>
+      <div className="brand"><Logo size={26} /><span>fieldwork<span className="brand-dot">.</span></span><span className="workspace-tag">WORKSPACE</span></div>
       <button className="new-research" onClick={reset}><span>＋</span> New research <kbd>⌘ K</kbd></button>
       <div className="side-label">YOUR WORKSPACE</div>
       <button className="nav-item selected"><span>▦</span> Research desk</button>

@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { API, fetchAuthConfig, forgotPassword, resetPassword, useAuth, type ServerAuthConfig } from './auth'
+import Logo from './Logo'
 
 type Mode = 'login' | 'register' | 'forgot' | 'reset'
 type Fields = { fullName: string; email: string; password: string; confirm: string }
@@ -115,7 +116,7 @@ export default function AuthPage() {
 
   return <div className="auth-shell">
     <aside className="auth-aside">
-      <div className="brand"><span className="brand-mark">f</span><span>fieldwork<span className="brand-dot">.</span></span></div>
+      <div className="brand"><Logo size={30} /><span>fieldwork<span className="brand-dot">.</span></span></div>
       <div className="auth-aside-copy">
         <div className="eyebrow"><span className="eyebrow-line" /> RESEARCH, WITH RIGOR</div>
         <h2>Make sense of the complex.</h2>
