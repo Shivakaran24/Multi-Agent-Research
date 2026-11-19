@@ -57,3 +57,9 @@
   .markdown{padding:0;color:#000;font-size:12pt;line-height:1.6}.markdown a{color:#000;text-decoration:none}.sources{border-top:1px solid #ccc;padding:14px 0 0;break-inside:avoid}.sources a{color:#000}
 }
 .brand-logo{flex:none;display:block}
+.sample-link{display:block;margin:14px auto 0;border:0;background:transparent;color:#2f6f4d;font-size:11px;font-weight:600;padding:6px 8px;border-radius:6px}.sample-link:hover{background:#eef4ee}
+.settings-modal.sample-modal{width:min(780px,calc(100vw - 32px));padding:30px 34px}
+.sample-label{font:9px 'DM Mono',monospace;letter-spacing:1px;color:#4f8862;background:#edf5ed;display:inline-block;border-radius:4px;padding:4px 7px}
+.sample-topic{font:500 21px/1.3 'Playfair Display',serif;margin:12px 28px 6px 0;color:#20231f}
+.sample-note{margin:0 0 6px;font-size:11px;color:#8a8e85}
+.sample-modal .markdown{padding:4px 0 0}.sample-modal .sources{padding:14px 0 0}

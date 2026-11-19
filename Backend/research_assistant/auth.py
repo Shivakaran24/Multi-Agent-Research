@@ -636,10 +636,15 @@ def create_auth_router(
     def me(request: Request) -> UserPublic:
         return current_user(request).public()
 
+    def refuse_for_demo(user: User) -> None:
+        if is_demo_user(user, get_settings()):
+            raise HTTPException(status_code=403, detail="The shared demo account cannot be changed or deleted.")
+
     @router.post("/change-password", response_model=AuthResponse)
     def change_password(body: ChangePasswordRequest, request: Request) -> AuthResponse:
         """Sets a new password and returns a fresh session; every other device is signed out."""
         user = current_user(request)
+        refuse_for_demo(user)
         confirm_password(user, body.current_password)
         if body.new_password == body.current_password:
             raise HTTPException(status_code=422, detail="Choose a password different from your current one.")
@@ -660,7 +665,7 @@ def create_auth_router(
             raise too_many(wait)
         forgot_limiter.record(ip)
         user = get_store().get_by_email(body.email)
-        if user is not None:
+        if user is not None and not is_demo_user(user, settings):  # the shared demo login is never reset
             token = get_store().create_reset_token(user.id, settings.reset_token_ttl_minutes)
             link = f"{settings.reset_link_base}/#/reset?token={token}"
             mailer = get_mailer() if get_mailer else create_mailer(settings)
@@ -696,6 +701,7 @@ def create_auth_router(
     async def delete_account(body: DeleteAccountRequest, request: Request) -> Response:
         def work() -> list[str]:
             user = current_user(request)
+            refuse_for_demo(user)
             confirm_password(user, body.password)
             return get_store().delete_user(user.id)
 
@@ -711,6 +717,11 @@ def create_auth_router(
 
 
 # --------------------------------------------------------------------------- command line
+
+
+def is_demo_user(user: User, settings: Settings) -> bool:
+    """True for the shared showcase login, which visitors must not be able to lock or delete."""
+    return bool(settings.demo_email) and user.email == settings.demo_email.strip().lower()
 
 
 def ensure_demo_user(store: UserStore, settings: Settings) -> bool:

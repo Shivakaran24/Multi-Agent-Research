@@ -17,7 +17,7 @@ burn your Groq/Tavily quota.
 4. Apply. The first build takes several minutes.
 
 ## 3. If Render renamed a service
-Service names are global. If it created e.g. `research-assistant-api-x1y2`, open the API service ->
+Service names are global. If it created e.g. `fieldwork-api-shivakaran24-x1y2`, open the API service ->
 Environment and set:
 - `ALLOWED_HOSTS` = `["<your-api-host>.onrender.com"]`
 - `CORS_ORIGINS` = `["https://<your-web-host>.onrender.com"]`

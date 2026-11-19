@@ -305,3 +305,22 @@ def test_demo_account_is_seeded_once_and_can_log_in(tmp_path):
     again, _ = make_client(tmp_path, fresh_database=False, **options)
     with again:
         assert again.post("/auth/login", json={"email": "demo@example.com", "password": "showcase123"}).status_code == 200
+
+
+def test_shared_demo_account_cannot_be_locked_or_deleted(tmp_path):
+    client, _ = make_client(
+        tmp_path, allow_registration=False, demo_email="demo@example.com", demo_password="showcase123"
+    )
+    with client:
+        login = client.post("/auth/login", json={"email": "demo@example.com", "password": "showcase123"})
+        headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        changed = client.post(
+            "/auth/change-password", headers=headers, json={"current_password": "showcase123", "new_password": "hacked123"}
+        )
+        assert changed.status_code == 403 and "demo account" in changed.json()["detail"]
+        deleted = client.post("/auth/delete-account", headers=headers, json={"password": "showcase123"})
+        assert deleted.status_code == 403
+        # Reset emails are never issued for it, and the original password still works.
+        client.post("/auth/forgot-password", json={"email": "demo@example.com"})
+        assert not client.app.state.mailer.sent
+        assert client.post("/auth/login", json={"email": "demo@example.com", "password": "showcase123"}).status_code == 200

@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { API, fetchAuthConfig, forgotPassword, resetPassword, useAuth, type ServerAuthConfig } from './auth'
 import Logo from './Logo'
+import SampleReport from './SampleReport'
 
 type Mode = 'login' | 'register' | 'forgot' | 'reset'
 type Fields = { fullName: string; email: string; password: string; confirm: string }
@@ -49,6 +50,7 @@ export default function AuthPage() {
   const [sent, setSent] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [showSample, setShowSample] = useState(false)
   const isRegister = mode === 'register'
   const registrationClosed = config?.registration_open === false
   const resetUnavailable = config?.password_reset_available === false
@@ -174,7 +176,9 @@ export default function AuthPage() {
           {isRegister && <>Already have an account? <a href="#/login">Sign in</a></>}
           {(mode === 'forgot' || mode === 'reset') && <>Remembered it? <a href="#/login">Back to sign in</a></>}
         </p>
+        <button type="button" className="sample-link" onClick={() => setShowSample(true)}>See an example research brief <span>↗</span></button>
       </form>
     </main>
+    {showSample && <SampleReport onClose={() => setShowSample(false)} />}
   </div>
 }
