@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import json
-import random
-import re
-import time
 from collections.abc import Callable
 from functools import lru_cache
 from typing import Any, TypedDict
@@ -15,6 +12,7 @@ from langchain_groq import ChatGroq
 from tavily import TavilyClient
 
 from research_assistant.config import Settings
+from research_assistant.llm_retry import invoke_with_retry
 from research_assistant.schemas import (
     FinalReport,
     ResearchFinding,
@@ -79,35 +77,7 @@ def _with_structured_output(model: Any, schema: Any) -> Any:
         return model.with_structured_output(schema)
 
 
-def _invoke_with_rate_limit_retry(runnable: Any, messages: list[Any]) -> Any:
-    """Retry transient Groq 429 responses while respecting the provider's wait hint."""
-    max_retries = 5
-    for attempt in range(max_retries + 1):
-        try:
-            return runnable.invoke(messages)
-        except Exception as exc:
-            status_code = getattr(exc, "status_code", None)
-            if status_code is None:
-                status_code = getattr(getattr(exc, "response", None), "status_code", None)
-            if status_code != 429 or attempt >= max_retries:
-                raise
-
-            retry_after = None
-            response = getattr(exc, "response", None)
-            headers = getattr(response, "headers", {}) or {}
-            try:
-                retry_after = float(headers.get("retry-after", "")) or None
-            except (TypeError, ValueError):
-                pass
-            if retry_after is None:
-                match = re.search(r"try again in ([0-9.]+)\s*(ms|milliseconds?|s|seconds?)", str(exc), re.I)
-                if match:
-                    retry_after = float(match.group(1))
-                    if match.group(2).lower().startswith("m"):
-                        retry_after /= 1_000
-
-            wait_seconds = min(30.0, (retry_after or 1.0) * (2**attempt))
-            time.sleep(wait_seconds + random.uniform(0, min(0.25, wait_seconds * 0.1)))
+_invoke_with_rate_limit_retry = invoke_with_retry  # retries 429s and malformed JSON; see llm_retry.py
 
 
 def create_node_implementations(
@@ -219,11 +189,13 @@ def create_node_implementations(
                             "Answer the query using only the supplied sources. Write a substantive evidence summary of "
                             "2-3 short paragraphs (roughly 1000-1600 characters): include concrete facts, figures, "
                             "named places/organizations and dates the sources give, note where sources disagree, "
-                            "and flag uncertainty. Return the required JSON; do not invent facts or citations."
+                            "and flag uncertainty. Write plain text only: no markdown, asterisks, double quotes or "
+                            "backslashes. Return the required JSON; do not invent facts or citations."
                     )
                 ),
                 HumanMessage(content=f"Query: {query}\n\nSearch results:\n{context}"),
-            ]
+            ],
+            ResearchSummary,
         )
         summary_text = summary.summary
 
