@@ -1,6 +1,7 @@
 """Validated payloads passed between the research agents, plus account/auth payloads."""
 
 import re
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -65,6 +66,60 @@ class ResearchPlan(BaseModel):
         return value
 
 
+_LANGUAGE_RE = re.compile(r"^[A-Za-z][A-Za-z .()'-]{1,39}$")
+
+
+class ResearchOptions(BaseModel):
+    """Per-run choices that shape how a brief is researched and written."""
+
+    style: Literal["brief", "executive", "pros_cons", "comparison"] = "brief"
+    audience: Literal["general", "executive", "technical", "student"] = "general"
+    length: Literal["short", "standard", "long"] = "standard"
+    language: str = "English"
+    time_range: Literal["day", "week", "month", "year"] | None = None
+    urls: list[str] = Field(default_factory=list, max_length=5)
+    notes: str = Field(default="", max_length=6_000)
+    verify_claims: bool | None = None  # None = use the server default
+
+    @field_validator("language")
+    @classmethod
+    def clean_language(cls, value: str) -> str:
+        value = value.strip() or "English"
+        if not _LANGUAGE_RE.match(value):
+            raise ValueError("Language must be a name such as English, Spanish or Hindi.")
+        return value
+
+    @field_validator("urls")
+    @classmethod
+    def clean_urls(cls, values: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for raw in values:
+            url = raw.strip()
+            if not url:
+                continue
+            if len(url) > 500 or not re.match(r"^https?://[^\s]+$", url, re.I):
+                raise ValueError("Each link must start with http:// or https://.")
+            if url not in cleaned:
+                cleaned.append(url)
+        return cleaned
+
+    @field_validator("notes")
+    @classmethod
+    def clean_notes(cls, value: str) -> str:
+        return value.strip()
+
+
+class ClaimCheck(BaseModel):
+    """Quotes from a brief that none of its sources support."""
+
+    unsupported: list[str] = Field(default_factory=list, description="Exact short quotes from the brief")
+
+    @field_validator("unsupported")
+    @classmethod
+    def bound_claims(cls, values: list[str]) -> list[str]:
+        return [fit_text(v, 300) for v in values if isinstance(v, str) and v.strip()][:8]
+
+
 class Source(BaseModel):
     title: str
     url: str
@@ -120,6 +175,7 @@ class RegisterRequest(BaseModel):
     full_name: str = Field(min_length=2, max_length=80)
     email: str = Field(max_length=254)
     password: str = Field(min_length=8, max_length=128)
+    invite_code: str | None = Field(default=None, max_length=100)
 
     @field_validator("full_name")
     @classmethod
@@ -156,6 +212,7 @@ class UserPublic(BaseModel):
     full_name: str
     created_at: str
     email_verified: bool = True
+    is_admin: bool = False
 
 
 class AuthResponse(BaseModel):
@@ -210,6 +267,7 @@ class AuthConfig(BaseModel):
     registration_open: bool
     password_reset_available: bool
     email_verification_required: bool = False
+    invite_required: bool = False
 
 
 class RunSummary(BaseModel):
@@ -222,6 +280,8 @@ class RunSummary(BaseModel):
     feedback: int | None = Field(default=None, description="1 = helpful, -1 = not helpful")
     share_token: str | None = Field(default=None, description="Present while a read-only link is active")
     tokens_used: int = Field(default=0, description="Model tokens spent on this run")
+    schedule_id: str | None = Field(default=None, description="Set when a recurring schedule started this run")
+    tags: list[str] = Field(default_factory=list)
 
 
 class SharedReport(BaseModel):
@@ -241,6 +301,7 @@ class Usage(BaseModel):
     daily_limit: int | None = Field(description="Runs allowed per rolling 24 hours; null when unlimited")
     default_iterations: int
     tokens_today: int = Field(default=0, description="Model tokens spent in the last 24 hours")
+    token_limit: int | None = Field(default=None, description="Tokens allowed per rolling 24 hours; null when unlimited")
 
 
 class RunList(BaseModel):

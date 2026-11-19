@@ -166,6 +166,7 @@ def test_auth_config_endpoint_reports_capabilities(tmp_path):
             "registration_open": False,
             "password_reset_available": True,
             "email_verification_required": False,
+            "invite_required": False,
         }
 
 

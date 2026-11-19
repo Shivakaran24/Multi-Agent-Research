@@ -154,7 +154,7 @@ def test_daily_limit_blocks_extra_runs_and_is_reported(tmp_path):
         blocked = client.post("/research/runs", json={"topic": "third topic here"}, headers=auth(token))
         assert blocked.status_code == 429 and "Daily research limit" in blocked.json()["detail"]
         data = runs(client, token)
-        assert data["usage"] == {"used_today": 2, "daily_limit": 2, "default_iterations": 1, "tokens_today": 0}
+        assert data["usage"] == {"used_today": 2, "daily_limit": 2, "default_iterations": 1, "tokens_today": 0, "token_limit": None}
         assert len(data["runs"]) == 2  # the blocked attempt left no ghost entry
         # Another account has its own allowance.
         other = token_for(client, "bob@example.com", "Bob Builder")
@@ -321,3 +321,24 @@ def test_usage_tracker_falls_back_to_llm_output():
     tracker = UsageTracker()
     tracker.on_llm_end(Old())
     assert tracker.total == 10
+
+
+def test_daily_token_budget_blocks_new_work_once_spent(tmp_path):
+    class TokenGraph(FakeGraph):
+        async def astream(self, graph_input, config, stream_mode="updates"):
+            tracker = next(c for c in config["callbacks"] if hasattr(c, "on_llm_end"))
+            tracker.on_llm_end(_Resp(1000, 250))
+            async for item in super().astream(graph_input, config, stream_mode):
+                yield item
+
+    client, _ = make_client(tmp_path, graph=TokenGraph(), max_tokens_per_user_per_day=2000)
+    with client:
+        token = token_for(client)
+        thread_id, _ = start_run(client, token)  # 1,250 spent, under the budget
+        assert client.post(f"/research/runs/{thread_id}/resume", json={}, headers=auth(token)).status_code == 200  # 2,500
+        usage = runs(client, token)["usage"]
+        assert usage["tokens_today"] == 2500 and usage["token_limit"] == 2000
+        blocked = client.post("/research/runs", json={"topic": "Another topic"}, headers=auth(token))
+        assert blocked.status_code == 429 and "token budget" in blocked.json()["detail"]
+        other = token_for(client, email="grace@example.com", name="Grace Hopper")
+        assert client.post("/research/runs", json={"topic": "Another topic"}, headers=auth(other)).status_code == 200

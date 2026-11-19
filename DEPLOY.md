@@ -34,7 +34,8 @@ and **Manual Deploy -> Clear build cache & deploy** (the API address is baked in
   Open the site a couple of minutes before a demo.
 - Free Render PostgreSQL databases expire after 30 days (history and the demo account are lost).
   Recreate it, or upgrade the database plan, if the link needs to live longer.
-- The demo login is capped at 5 runs/day total (`MAX_RUNS_PER_USER_PER_DAY`). Raise it for a live demo.
+- The demo login is capped at 5 runs/day total (`MAX_RUNS_PER_USER_PER_DAY`). Raise it for a live demo. `MAX_TOKENS_PER_USER_PER_DAY` (150,000 in `render.yaml`) caps model usage the same way.
+- Recurring research only runs while the API is awake. Render's free tier sleeps after about 15 minutes without traffic, so a schedule fires when the service next wakes (it catches up on the first pass). For on-time runs, keep the service awake with a free uptime monitor (for example UptimeRobot) pinging `/healthz` every 5 minutes, or use a paid instance. Emails need SMTP (see README).
 - Public sign-up is off. To let others register, set `ALLOW_REGISTRATION=true` (anyone with the link
   can then create accounts and spend your API quota).
 - Password reset email needs `SMTP_*` settings; without them the "Forgot password" link is hidden.

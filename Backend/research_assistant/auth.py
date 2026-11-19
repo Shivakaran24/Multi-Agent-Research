@@ -199,6 +199,19 @@ _SCHEMA = (
         expires_at TEXT NOT NULL,
         used INTEGER NOT NULL DEFAULT 0
     )""",
+    """CREATE TABLE IF NOT EXISTS schedules (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        topic TEXT NOT NULL,
+        frequency TEXT NOT NULL,
+        depth INTEGER,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        next_run_at TEXT NOT NULL,
+        last_run_at TEXT,
+        last_thread_id TEXT,
+        last_status TEXT,
+        created_at TEXT NOT NULL
+    )""",
     """CREATE TABLE IF NOT EXISTS email_tokens (
         token_hash TEXT PRIMARY KEY,
         user_id TEXT NOT NULL REFERENCES users(id),
@@ -219,10 +232,12 @@ _MIGRATIONS = (
     ("research_runs", "feedback", "INTEGER"),
     ("research_runs", "share_token", "TEXT"),
     ("research_runs", "tokens_used", "INTEGER NOT NULL DEFAULT 0"),
+    ("research_runs", "schedule_id", "TEXT"),
+    ("research_runs", "tags", "TEXT"),
 )
 
 _USER_COLUMNS = "id, email, full_name, password_hash, created_at, token_version, email_verified"
-_RUN_COLUMNS = "thread_id, user_id, topic, title, status, created_at, COALESCE(updated_at, created_at), plan, report, feedback, share_token, tokens_used"
+_RUN_COLUMNS = "thread_id, user_id, topic, title, status, created_at, COALESCE(updated_at, created_at), plan, report, feedback, share_token, tokens_used, schedule_id, tags"
 
 
 class UserStore:
@@ -341,6 +356,7 @@ class UserStore:
             ]
             conn.execute(self._sql("DELETE FROM password_resets WHERE user_id = ?"), (user_id,))
             conn.execute(self._sql("DELETE FROM email_tokens WHERE user_id = ?"), (user_id,))
+            conn.execute(self._sql("DELETE FROM schedules WHERE user_id = ?"), (user_id,))
             conn.execute(self._sql("DELETE FROM research_runs WHERE user_id = ?"), (user_id,))
             conn.execute(self._sql("DELETE FROM users WHERE id = ?"), (user_id,))
         return threads
@@ -410,16 +426,16 @@ class UserStore:
 
     # ---- research runs / history
 
-    def record_run(self, thread_id: str, user_id: str, topic: str) -> None:
+    def record_run(self, thread_id: str, user_id: str, topic: str, schedule_id: str | None = None) -> None:
         now = _now()
         try:
             with self._connect() as conn:
                 conn.execute(
                     self._sql(
-                        "INSERT INTO research_runs (thread_id, user_id, topic, created_at, status, updated_at) "
-                        "VALUES (?, ?, ?, ?, 'planning', ?)"
+                        "INSERT INTO research_runs (thread_id, user_id, topic, created_at, status, updated_at, schedule_id) "
+                        "VALUES (?, ?, ?, ?, 'planning', ?, ?)"
                     ),
-                    (thread_id, user_id, topic[:2_000], now, now),
+                    (thread_id, user_id, topic[:2_000], now, now, schedule_id),
                 )
         except self._integrity:
             # Unknown user (e.g. deleted account with a still-valid token): treat as unauthorized.
@@ -449,11 +465,12 @@ class UserStore:
 
     @staticmethod
     def _run(row: Any, *, detail: bool) -> dict[str, Any]:
-        thread_id, user_id, topic, title, status, created_at, updated_at, plan, report, feedback, share_token, tokens_used = row
+        thread_id, user_id, topic, title, status, created_at, updated_at, plan, report, feedback, share_token, tokens_used, schedule_id, tags = row
         data: dict[str, Any] = {
             "thread_id": thread_id, "user_id": user_id, "topic": topic, "title": title,
             "status": status, "created_at": created_at, "updated_at": updated_at,
-            "feedback": feedback, "share_token": share_token, "tokens_used": tokens_used or 0,
+            "feedback": feedback, "share_token": share_token, "tokens_used": tokens_used or 0, "schedule_id": schedule_id,
+            "tags": json.loads(tags) if tags else [],
         }
         if detail:
             data["plan"] = json.loads(plan) if plan else None
@@ -501,6 +518,54 @@ class UserStore:
         with self._connect() as conn:
             return conn.execute(self._sql(query), params).rowcount == 1
 
+    def set_tags(self, thread_id: str, user_id: str | None, tags: list[str]) -> bool:
+        query = "UPDATE research_runs SET tags = ? WHERE thread_id = ?"
+        params: tuple[Any, ...] = (json.dumps(tags, ensure_ascii=False) if tags else None, thread_id)
+        if user_id is not None:
+            query += " AND user_id = ?"
+            params += (user_id,)
+        with self._connect() as conn:
+            return conn.execute(self._sql(query), params).rowcount == 1
+
+    def admin_stats(self, day_ago_iso: str, week_ago_iso: str) -> dict[str, Any]:
+        """Aggregate numbers for the admin page."""
+        with self._connect() as conn:
+            def one(sql: str, *params: Any) -> int:
+                return int(conn.execute(self._sql(sql), params).fetchone()[0] or 0)
+
+            by_status = dict(conn.execute("SELECT status, COUNT(*) FROM research_runs GROUP BY status").fetchall())
+            failures = conn.execute(
+                self._sql(
+                    "SELECT r.topic, r.status, r.created_at, u.email FROM research_runs r JOIN users u ON u.id = r.user_id "
+                    "WHERE r.status IN ('failed', 'interrupted') ORDER BY r.created_at DESC LIMIT 10"
+                )
+            ).fetchall()
+            top = conn.execute(
+                self._sql(
+                    "SELECT u.email, COUNT(r.thread_id), COALESCE(SUM(r.tokens_used), 0) FROM users u "
+                    "JOIN research_runs r ON r.user_id = u.id GROUP BY u.email "
+                    "ORDER BY COALESCE(SUM(r.tokens_used), 0) DESC LIMIT 5"
+                )
+            ).fetchall()
+            return {
+                "users": one("SELECT COUNT(*) FROM users"),
+                "new_users_7d": one("SELECT COUNT(*) FROM users WHERE created_at >= ?", week_ago_iso),
+                "runs_total": one("SELECT COUNT(*) FROM research_runs"),
+                "runs_24h": one("SELECT COUNT(*) FROM research_runs WHERE created_at >= ?", day_ago_iso),
+                "runs_7d": one("SELECT COUNT(*) FROM research_runs WHERE created_at >= ?", week_ago_iso),
+                "runs_by_status": {str(k): int(v) for k, v in by_status.items()},
+                "tokens_total": one("SELECT COALESCE(SUM(tokens_used), 0) FROM research_runs"),
+                "tokens_24h": one("SELECT COALESCE(SUM(tokens_used), 0) FROM research_runs WHERE created_at >= ?", day_ago_iso),
+                "feedback_up": one("SELECT COUNT(*) FROM research_runs WHERE feedback = 1"),
+                "feedback_down": one("SELECT COUNT(*) FROM research_runs WHERE feedback = -1"),
+                "schedules": one("SELECT COUNT(*) FROM schedules"),
+                "schedules_active": one("SELECT COUNT(*) FROM schedules WHERE enabled = 1"),
+                "recent_failures": [
+                    {"topic": r[0][:90], "status": r[1], "created_at": r[2], "user": r[3]} for r in failures
+                ],
+                "top_users": [{"email": r[0], "runs": int(r[1]), "tokens": int(r[2])} for r in top],
+            }
+
     def set_share_token(self, thread_id: str, user_id: str | None, enable: bool) -> str | None:
         """Create (or keep) a read-only link token, or revoke it. Returns the active token, if any."""
         run = self.get_run(thread_id, user_id)
@@ -528,6 +593,108 @@ class UserStore:
                 self._sql("SELECT 1 FROM research_runs WHERE thread_id = ? AND user_id = ?"), (thread_id, user_id)
             ).fetchone()
         return row is not None
+
+    # ---- recurring research
+
+    _SCHEDULE_COLUMNS = (
+        "id, user_id, topic, frequency, depth, enabled, next_run_at, last_run_at, last_thread_id, last_status, created_at"
+    )
+
+    @staticmethod
+    def _schedule(row: Any) -> dict[str, Any]:
+        keys = ("id", "user_id", "topic", "frequency", "depth", "enabled", "next_run_at",
+                "last_run_at", "last_thread_id", "last_status", "created_at")
+        data = dict(zip(keys, row, strict=True))
+        data["enabled"] = bool(data["enabled"])
+        return data
+
+    def create_schedule(self, user_id: str, topic: str, frequency: str, depth: int | None, first_run_at: str) -> dict[str, Any]:
+        schedule_id = str(uuid.uuid4())
+        with self._connect() as conn:
+            conn.execute(
+                self._sql(
+                    "INSERT INTO schedules (id, user_id, topic, frequency, depth, enabled, next_run_at, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, 1, ?, ?)"
+                ),
+                (schedule_id, user_id, topic[:2_000], frequency, depth, first_run_at, _now()),
+            )
+        found = self.get_schedule(schedule_id, user_id)
+        assert found is not None
+        return found
+
+    def list_schedules(self, user_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                self._sql(f"SELECT {self._SCHEDULE_COLUMNS} FROM schedules WHERE user_id = ? ORDER BY created_at"), (user_id,)
+            ).fetchall()
+        return [self._schedule(row) for row in rows]
+
+    def get_schedule(self, schedule_id: str, user_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                self._sql(f"SELECT {self._SCHEDULE_COLUMNS} FROM schedules WHERE id = ? AND user_id = ?"),
+                (schedule_id, user_id),
+            ).fetchone()
+        return None if row is None else self._schedule(row)
+
+    def update_schedule(self, schedule_id: str, user_id: str, *, enabled: bool | None = None, next_run_at: str | None = None) -> bool:
+        sets, values = [], []
+        if enabled is not None:
+            sets.append("enabled = ?")
+            values.append(int(enabled))
+        if next_run_at is not None:
+            sets.append("next_run_at = ?")
+            values.append(next_run_at)
+        if not sets:
+            return self.get_schedule(schedule_id, user_id) is not None
+        with self._connect() as conn:
+            return conn.execute(
+                self._sql(f"UPDATE schedules SET {', '.join(sets)} WHERE id = ? AND user_id = ?"),
+                (*values, schedule_id, user_id),
+            ).rowcount == 1
+
+    def delete_schedule(self, schedule_id: str, user_id: str) -> bool:
+        with self._connect() as conn:
+            return conn.execute(
+                self._sql("DELETE FROM schedules WHERE id = ? AND user_id = ?"), (schedule_id, user_id)
+            ).rowcount == 1
+
+    def count_schedules(self, user_id: str) -> int:
+        with self._connect() as conn:
+            return int(conn.execute(self._sql("SELECT COUNT(*) FROM schedules WHERE user_id = ?"), (user_id,)).fetchone()[0])
+
+    def claim_due(self, now_iso: str, next_for: Callable[[str], str], limit: int = 3) -> list[dict[str, Any]]:
+        """Atomically take schedules that are due, moving each one's next run forward so it fires once."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                self._sql(
+                    f"SELECT {self._SCHEDULE_COLUMNS} FROM schedules WHERE enabled = 1 AND next_run_at <= ? "
+                    "ORDER BY next_run_at LIMIT ?"
+                ),
+                (now_iso, limit),
+            ).fetchall()
+        claimed = []
+        for row in rows:
+            data = self._schedule(row)
+            with self._connect() as conn:
+                took = conn.execute(
+                    self._sql("UPDATE schedules SET next_run_at = ?, last_run_at = ? WHERE id = ? AND next_run_at = ?"),
+                    (next_for(data["frequency"]), now_iso, data["id"], data["next_run_at"]),
+                ).rowcount
+            if took == 1:
+                claimed.append(data)
+        return claimed
+
+    def finish_schedule(self, schedule_id: str, thread_id: str | None, status: str, retry_at: str | None = None) -> None:
+        sets, values = ["last_status = ?"], [status]
+        if thread_id:
+            sets.append("last_thread_id = ?")
+            values.append(thread_id)
+        if retry_at:
+            sets.append("next_run_at = ?")
+            values.append(retry_at)
+        with self._connect() as conn:
+            conn.execute(self._sql(f"UPDATE schedules SET {', '.join(sets)} WHERE id = ?"), (*values, schedule_id))
 
     def add_tokens(self, thread_id: str, tokens: int) -> None:
         """Add model tokens spent by a run (a run can be streamed in several parts)."""
@@ -668,12 +835,15 @@ def create_auth_router(
     forgot_limiter = AttemptLimiter(limit=5, window_seconds=60 * 60)
     password_limiter = AttemptLimiter(limit=5, window_seconds=15 * 60)
 
+    def public_user(user: User, settings: Settings) -> UserPublic:
+        return user.public().model_copy(update={"is_admin": user.email.lower() in settings.admin_email_list})
+
     def issue(user: User, settings: Settings) -> AuthResponse:
         expires_in = settings.access_token_expire_minutes * 60
         return AuthResponse(
             access_token=create_access_token(user.id, signing_secret(settings), expires_in, user.token_version),
             expires_in=expires_in,
-            user=user.public(),
+            user=public_user(user, settings),
         )
 
     def client_ip(request: Request) -> str:
@@ -728,6 +898,7 @@ def create_auth_router(
             registration_open=settings.registration_open,
             password_reset_available=settings.password_reset_available,
             email_verification_required=settings.email_verification_required,
+            invite_required=settings.invite_required,
         )
 
     @router.post("/register", status_code=201, response_model=AuthResponse)
@@ -739,6 +910,10 @@ def create_auth_router(
         if wait := register_limiter.retry_after(ip):
             raise too_many(wait)
         register_limiter.record(ip)
+        if settings.invite_required and not any(
+            secrets.compare_digest(body.invite_code or "", code) for code in settings.invite_code_list
+        ):
+            raise HTTPException(status_code=403, detail="That invite code is not valid.")
         try:
             user = get_store().create_user(
                 email=body.email,
@@ -768,7 +943,7 @@ def create_auth_router(
 
     @router.get("/me", response_model=UserPublic)
     def me(request: Request) -> UserPublic:
-        return current_user(request).public()
+        return public_user(current_user(request), get_settings())
 
     def refuse_for_demo(user: User) -> None:
         if is_demo_user(user, get_settings()):

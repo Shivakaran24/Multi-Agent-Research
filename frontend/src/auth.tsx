@@ -2,10 +2,10 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 
 export const API = (import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
 
-export type User = { id: string; email: string; full_name: string; created_at: string; email_verified?: boolean }
+export type User = { id: string; email: string; full_name: string; created_at: string; email_verified?: boolean; is_admin?: boolean }
 type AuthResponse = { access_token: string; expires_in: number; user: User }
 export type Session = { token: string; user: User; expiresAt: number }
-export type ServerAuthConfig = { registration_open: boolean; password_reset_available: boolean; email_verification_required?: boolean; unreachable?: boolean }
+export type ServerAuthConfig = { registration_open: boolean; password_reset_available: boolean; email_verification_required?: boolean; invite_required?: boolean; unreachable?: boolean }
 
 type AuthContextValue = {
   session: Session | null
@@ -14,7 +14,7 @@ type AuthContextValue = {
   /** Why the user was signed out (e.g. an expired session), shown on the login page. */
   notice: string
   login: (email: string, password: string) => Promise<void>
-  register: (fullName: string, email: string, password: string) => Promise<void>
+  register: (fullName: string, email: string, password: string, inviteCode?: string) => Promise<void>
   logout: (notice?: string) => void
   /** Changes the password; this device stays signed in, every other device is signed out. */
   changePassword: (current: string, next: string) => Promise<void>
@@ -148,7 +148,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     notice,
     logout,
     login: async (email, password) => start(await postAuth('/auth/login', { email, password })),
-    register: async (full_name, email, password) => start(await postAuth('/auth/register', { full_name, email, password })),
+    register: async (full_name, email, password, invite_code) => start(await postAuth('/auth/register', { full_name, email, password, ...(invite_code ? { invite_code } : {}) })),
     changePassword: async (current_password, new_password) => {
       if (!session) throw new Error('Please sign in again.')
       start(await postAuth('/auth/change-password', { current_password, new_password }, session.token))

@@ -90,6 +90,7 @@ def make_client(tmp_path, graph=None, fresh_database=True, **overrides):
         if fresh_database:
             reset_postgres()
         overrides.setdefault("database_url", POSTGRES_URL)
+    overrides.setdefault("scheduler_enabled", False)  # tests trigger schedules explicitly
     settings = Settings(
         _env_file=None,
         auth_secret_key=SECRET,

@@ -31,6 +31,7 @@ jobs:
           cache-dependency-path: Backend/pyproject.toml
       - run: pip install -e ".[dev,postgres]"
       - run: python -m pytest tests -q
+      - run: ruff check .
 
   frontend:
     runs-on: ubuntu-latest
@@ -44,3 +45,4 @@ jobs:
           node-version: 22
       - run: npm install --no-audit --no-fund
       - run: npm run build
+      - run: npm test

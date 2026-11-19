@@ -13,8 +13,11 @@ from langchain_groq import ChatGroq
 from tavily import TavilyClient
 
 from research_assistant.config import Settings
+from research_assistant.claims import check_claims
+from research_assistant.sources import filter_and_rank
 from research_assistant.llm_retry import invoke_with_retry
 from research_assistant.schemas import (
+    ClaimCheck,
     FinalReport,
     ResearchFinding,
     ResearchPlan,
@@ -100,6 +103,64 @@ def _with_structured_output(model: Any, schema: Any) -> Any:
 _invoke_with_rate_limit_retry = invoke_with_retry  # retries 429s and malformed JSON; see llm_retry.py
 
 
+STYLE_GUIDE = {
+    "brief": (
+        "Use this structure: a short 'Key takeaways' bullet list, then one '##' section per major theme with "
+        "specific facts, figures, examples and comparisons, then '## Open questions and limitations'."
+    ),
+    "executive": (
+        "Write an executive summary: '## Bottom line' (2-3 sentences), '## Key points' (5-7 bullets, each with "
+        "a figure or fact), '## Risks and uncertainties', and '## Recommended next steps'. Be decisive and brief."
+    ),
+    "pros_cons": (
+        "Structure it as: '## Overview', '## Pros' (each point with evidence), '## Cons' (each point with "
+        "evidence), '## Verdict' (when it is a good idea and when it is not)."
+    ),
+    "comparison": (
+        "Structure it as a comparison: '## At a glance' with a Markdown table (one row per option or criterion, "
+        "columns for each option, concise cells), then one '##' section per important criterion explaining the "
+        "difference with evidence, then '## Which to choose when'. Treat every option evenly."
+    ),
+}
+LENGTH_GUIDE = {"short": "roughly 2500-3500", "standard": "roughly 5000-8000", "long": "roughly 8000-10000"}
+AUDIENCE_GUIDE = {
+    "general": "Write for an intelligent general reader; explain jargon briefly.",
+    "executive": "Write for a busy executive: lead with implications and decisions, minimise jargon.",
+    "technical": "Write for a technical reader: be precise, keep technical terms and quantitative detail.",
+    "student": "Write for a student: explain concepts step by step with simple examples.",
+}
+
+
+def writer_instructions(options: dict[str, Any]) -> str:
+    """System prompt for the writer, shaped by the run's style, audience, length and language."""
+    style = options.get("style", "brief")
+    language = options.get("language") or "English"
+    text = (
+        f"Write a well-organized Markdown research brief ({LENGTH_GUIDE.get(options.get('length', 'standard'), LENGTH_GUIDE['standard'])} "
+        "characters) answering the topic using only the supplied evidence. "
+        f"{STYLE_GUIDE.get(style, STYLE_GUIDE['brief'])} "
+        f"{AUDIENCE_GUIDE.get(options.get('audience', 'general'), AUDIENCE_GUIDE['general'])} "
+        "Cite every factual claim with the provided numbers like [1][2], and only cite a source whose "
+        "excerpt or the finding summary actually supports the claim. Do not invent facts; "
+        "state uncertainty; omit the Sources section."
+    )
+    if language.lower() != "english":
+        text += f" Write the whole brief, including headings, in {language}; keep citation numbers as digits."
+    return text
+
+
+def planner_hint(options: dict[str, Any]) -> str:
+    hints = []
+    if options.get("style") == "comparison":
+        hints.append(
+            "The topic compares options: include questions that cover each option on its own and head-to-head "
+            "on the criteria that matter, giving every option equal attention."
+        )
+    if options.get("time_range"):
+        hints.append(f"Focus on developments from the last {options['time_range']}.")
+    return " ".join(hints)
+
+
 def create_node_implementations(
     *,
     settings: Settings | None = None,
@@ -138,14 +199,26 @@ def create_node_implementations(
             raise ValueError("Set TAVILY_API_KEY before creating the default search client.")
         tavily = TavilyClient(api_key=settings.tavily_api_key.get_secret_value())
 
-        def search(query: str) -> list[dict[str, Any]]:
+        def search(query: str, time_range: str | None = None) -> list[dict[str, Any]]:
+            options: dict[str, Any] = {}
+            if time_range or settings.search_time_range:
+                options["time_range"] = time_range or settings.search_time_range
+            if settings.blocked_domains:
+                options["exclude_domains"] = settings.blocked_domains[:150]
             result = tavily.search(
                 query=query,
                 search_depth="basic",
-                max_results=settings.search_results_per_query,
+                # Ask for extra results so filtering and ranking still leave a full set.
+                max_results=min(settings.search_results_per_query * 2, 12),
                 include_raw_content=False,
+                **options,
             )
-            return result.get("results", [])
+            return filter_and_rank(
+                result.get("results", []),
+                limit=settings.search_results_per_query,
+                blocked=settings.blocked_domains,
+                preferred=settings.preferred_domains,
+            )
 
     def lead_planner_node(state: ResearchState) -> dict[str, Any]:
         """Break the topic into a small set of focused, non-overlapping questions."""
@@ -162,10 +235,19 @@ def create_node_implementations(
                             f"{settings.initial_questions} distinct, focused questions that cover "
                             "key facts, relevant context, and multiple credible perspectives. "
                             "Respond in valid JSON matching the schema. "
-                            "Each question must be independently researchable and include a rationale."
+                            "Each question must be independently researchable and include a rationale. "
+                            + planner_hint(state.get("options") or {})
                         )
                     ),
-                    HumanMessage(content=f"Research topic: {state['topic']}"),
+                    HumanMessage(
+                        content=f"Research topic: {state['topic']}"
+                        + (
+                            "\n\nBackground from the user (use it to focus the questions; it is not evidence): "
+                            + str((state.get("options") or {}).get("notes", ""))[:1500]
+                            if (state.get("options") or {}).get("notes")
+                            else ""
+                        )
+                    ),
                 ]
             )
             questions = plan.questions[: settings.initial_questions]
@@ -177,7 +259,8 @@ def create_node_implementations(
     def researcher_node(worker: ResearcherWorkerState) -> dict[str, Any]:
         """Search Tavily for one query and synthesize its source-backed evidence."""
         query = worker["query"]
-        results = search(query)
+        time_range = worker.get("time_range")
+        results = search(query, time_range=time_range) if time_range else search(query)
         sources: list[Source] = []
         for result in results:
             url = result.get("url")
@@ -259,26 +342,19 @@ def create_node_implementations(
     def writer_node(state: ResearchState) -> dict[str, Any]:
         """Synthesize findings into a report and append a deterministic source list."""
         evidence, bibliography = _citation_context(state.get("findings", []))
+        options = state.get("options") or {}
         writer = _with_structured_output(llm, FinalReport)
+        notes = str(options.get("notes") or "")[:3000]
         report = _invoke_with_rate_limit_retry(
             writer,
             [
-                SystemMessage(
-                    content=(
-                        "Write a thorough, well-organized Markdown research brief (roughly 5000-8000 characters) "
-                        "answering the topic using only the supplied evidence. Use this structure: a short "
-                        "'Key takeaways' bullet list, then one '##' section per major theme with specific facts, "
-                        "figures, examples and comparisons, then '## Open questions and limitations'. "
-                        "Cite every factual claim with the provided numbers like [1][2], and only cite a source whose "
-                        "excerpt or the finding summary actually supports the claim. Do not invent facts; "
-                        "state uncertainty; omit the Sources section."
-                    )
-                ),
+                SystemMessage(content=writer_instructions(options)),
                 HumanMessage(
                     content=(
                         f"Main topic: {state['topic']}\n\n"
                         f"Reviewer notes: {state.get('review_notes', 'None')}\n\n"
-                        f"Verified findings and numbered sources:\n{evidence}"
+                        + (f"User background notes (context only, not citable evidence): {notes}\n\n" if notes else "")
+                        + f"Verified findings and numbered sources:\n{evidence}"
                     )
                 ),
             ]
@@ -286,6 +362,9 @@ def create_node_implementations(
         title = report.title
         source_count = len(bibliography.splitlines()) if bibliography else 0
         markdown = sanitize_citations(report.markdown, source_count)
+        verify = options.get("verify_claims")
+        if (settings.claim_check if verify is None else verify) and state.get("findings"):
+            markdown, _ = check_claims(markdown, state["findings"], _with_structured_output(fast_llm, ClaimCheck))
 
         sources = bibliography or "No web sources were returned."
         return {"report": f"# {title}\n\n{markdown}\n\n## Sources\n\n{sources}"}

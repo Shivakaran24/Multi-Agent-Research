@@ -1,7 +1,7 @@
 """LangGraph state definitions, including isolated worker input."""
 
 import operator
-from typing import Annotated, TypedDict
+from typing import Annotated, NotRequired, TypedDict
 
 from research_assistant.schemas import ResearchFinding
 
@@ -17,9 +17,12 @@ class ResearchState(TypedDict, total=False):
     sufficient: bool
     review_notes: str
     report: str
+    # Per-run choices (ResearchOptions as a dict): style, audience, length, language, time_range, notes.
+    options: dict
 
 
 class ResearcherWorkerState(TypedDict):
     """Only the assigned query is sent to each parallel researcher."""
 
     query: str
+    time_range: NotRequired[str | None]

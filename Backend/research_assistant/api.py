@@ -29,6 +29,7 @@ from tavily import TavilyClient
 from research_assistant.auth import (
     UserStore,
     bearer_token,
+    is_demo_user,
     create_auth_router,
     create_mailer,
     ensure_demo_user,
@@ -37,10 +38,11 @@ from research_assistant.auth import (
     verify_access_token,
 )
 from research_assistant.config import Settings
-from research_assistant.followup import answer_followup
+from research_assistant.followup import answer_followup, summarize_changes
 from research_assistant.usage import UsageTracker
+from research_assistant.usersources import fetch_user_sources
 from research_assistant.graph import build_research_graph
-from research_assistant.schemas import ResearchQuestion, RunDetail, RunList, SharedReport
+from research_assistant.schemas import normalize_email, ResearchOptions, ResearchQuestion, RunDetail, RunList, SharedReport
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +50,7 @@ logger = logging.getLogger(__name__)
 class StartResearchRequest(BaseModel):
     topic: str = Field(min_length=3, max_length=2_000)
     max_iterations: int | None = Field(default=None, ge=1, le=8)
+    options: ResearchOptions | None = None
 
     @field_validator("topic")
     @classmethod
@@ -77,6 +80,73 @@ class FollowUpRequest(BaseModel):
 
 
 FOLLOWUPS_PER_HOUR = 20
+
+
+SCHEDULE_PERIODS = {"daily": timedelta(days=1), "weekly": timedelta(days=7), "monthly": timedelta(days=30)}
+
+
+class ScheduleRequest(BaseModel):
+    topic: str = Field(min_length=3, max_length=2_000)
+    frequency: str = "weekly"
+    max_iterations: int | None = Field(default=None, ge=1, le=8)
+
+    @field_validator("topic")
+    @classmethod
+    def trim_schedule_topic(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < 3:
+            raise ValueError("Topic must contain at least three non-space characters.")
+        return value
+
+    @field_validator("frequency")
+    @classmethod
+    def known_frequency(cls, value: str) -> str:
+        if value not in SCHEDULE_PERIODS:
+            raise ValueError("Frequency must be daily, weekly or monthly.")
+        return value
+
+
+class SchedulePatch(BaseModel):
+    enabled: bool
+
+
+def _iso(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _next_run(frequency: str) -> str:
+    return _iso(datetime.now(timezone.utc) + SCHEDULE_PERIODS[frequency])
+
+
+_TAG_RE = re.compile(r"^[a-z0-9][a-z0-9 _-]{0,23}$")
+
+
+class TagsRequest(BaseModel):
+    tags: list[str] = Field(max_length=5)
+
+    @field_validator("tags")
+    @classmethod
+    def clean_tags(cls, values: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for raw in values:
+            tag = " ".join(raw.lower().split())
+            if not _TAG_RE.match(tag):
+                raise ValueError("Tags are 1-24 characters: letters, numbers, spaces, - or _.")
+            if tag not in cleaned:
+                cleaned.append(tag)
+        return cleaned
+
+
+class EmailBriefRequest(BaseModel):
+    to: str | None = Field(default=None, max_length=254)
+
+    @field_validator("to")
+    @classmethod
+    def valid_recipient(cls, value: str | None) -> str | None:
+        return normalize_email(value) if value and value.strip() else None
+
+
+EMAILS_PER_HOUR = 10
 
 
 class FeedbackRequest(BaseModel):
@@ -421,6 +491,17 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        async with base_lifespan(app):
+            task = asyncio.create_task(scheduler_loop()) if active_settings.scheduler_enabled else None
+            try:
+                yield
+            finally:
+                if task is not None:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+
+    @asynccontextmanager
+    async def base_lifespan(app: FastAPI):
         if not logging.getLogger().handlers:
             logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
         app.state.database_ready = active_settings.database_url is None
@@ -592,6 +673,19 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
                     raise HTTPException(status_code=503, detail=str(exc)) from exc
         return app.state.research_graph, live_settings
 
+    async def enforce_token_budget(user_id: str, settings: Settings) -> None:
+        """Refuse new work once a user has spent their rolling 24-hour token budget."""
+        budget = settings.max_tokens_per_user_per_day
+        if not budget:
+            return
+        since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat(timespec="microseconds")
+        spent = await asyncio.to_thread(get_store().tokens_since, user_id, since)
+        if spent >= budget:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Daily token budget reached ({budget:,} tokens per 24 hours). Try again later.",
+            )
+
     def limited_stream(
         graph: Any,
         graph_input: Any,
@@ -705,6 +799,7 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
                         status_code=429,
                         detail=f"Daily research limit reached ({daily_limit} runs per 24 hours). Try again later.",
                     )
+            await enforce_token_budget(user_id, active_settings)
             if active_settings.email_verification_required:
                 account = await asyncio.to_thread(get_store().get_by_id, user_id)
                 if account is not None and not account.email_verified:
@@ -712,19 +807,41 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
                         status_code=403,
                         detail="Confirm your email address before starting research. Check your inbox or resend the link.",
                     )
-            try:
-                await asyncio.to_thread(get_store().record_run, thread_id, user_id, body.topic)
-            except PermissionError:
-                raise HTTPException(status_code=401, detail="Your account no longer exists. Please sign in again.") from None
         config = {
             "configurable": {"thread_id": thread_id},
             "max_concurrency": active_settings.max_parallel_graph_tasks,
         }
+        options = body.options or ResearchOptions()
+        provided = []
+        if options.urls:
+            if not active_settings.tavily_api_key:
+                raise HTTPException(status_code=503, detail="Reading your links is not configured on the server.")
+            try:
+                found = await asyncio.to_thread(
+                    fetch_user_sources,
+                    options.urls,
+                    TavilyClient(api_key=active_settings.tavily_api_key.get_secret_value()),
+                )
+            except Exception as exc:
+                logger.warning("Could not read user links: %s", type(exc).__name__)
+                found = None
+            if found is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Could not read any of the links you provided. Check they are public pages, or remove them.",
+                )
+            provided = [found]
+        if user_id is not None:
+            try:
+                await asyncio.to_thread(get_store().record_run, thread_id, user_id, body.topic)
+            except PermissionError:
+                raise HTTPException(status_code=401, detail="Your account no longer exists. Please sign in again.") from None
         graph_input = {
             "topic": body.topic.strip(),
-            "findings": [],
+            "findings": provided,
             "iteration": 0,
             "max_iterations": body.max_iterations or active_settings.max_iterations,
+            "options": options.model_dump(mode="json", exclude={"urls"}),
         }
         return limited_stream(graph, graph_input, config, thread_id, user_id=user_id)
 
@@ -738,7 +855,7 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
         tokens_today = 0
         if user_id is not None:
             store = get_store()
-            runs = [public_run(row) for row in await asyncio.to_thread(store.list_runs, user_id, 50)]
+            runs = [public_run(row) for row in await asyncio.to_thread(store.list_runs, user_id, 200)]
             since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat(timespec="microseconds")
             used = await asyncio.to_thread(store.count_runs_since, user_id, since)
             tokens_today = await asyncio.to_thread(store.tokens_since, user_id, since)
@@ -749,6 +866,7 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
                 "daily_limit": current.max_runs_per_user_per_day or None,
                 "default_iterations": current.max_iterations,
                 "tokens_today": tokens_today,
+                "token_limit": current.max_tokens_per_user_per_day or None,
             },
         }
 
@@ -807,6 +925,9 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
         if not questions:
             raise HTTPException(status_code=422, detail="No plan questions are available to approve.")
 
+        resume_user = getattr(request.state, "user_id", None)
+        if resume_user is not None:
+            await enforce_token_budget(resume_user, active_settings)
         command = Command(resume={"questions": [question.model_dump(mode="json") for question in questions]})
         return limited_stream(
             graph, command, config, thread_id,
@@ -823,6 +944,70 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
         if not await asyncio.to_thread(get_store().set_feedback, thread_id, user_id, body.value):
             raise HTTPException(status_code=404, detail="Research thread was not found.")
         return Response(status_code=204)
+
+    @app.put("/research/runs/{thread_id}/tags")
+    async def set_tags(thread_id: str, body: TagsRequest, request: Request) -> dict[str, Any]:
+        try:
+            uuid.UUID(thread_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="Research thread was not found.") from exc
+        user_id = getattr(request.state, "user_id", None)
+        if not await asyncio.to_thread(get_store().set_tags, thread_id, user_id, body.tags):
+            raise HTTPException(status_code=404, detail="Research thread was not found.")
+        return {"tags": body.tags}
+
+    @app.post("/research/runs/{thread_id}/email")
+    async def email_brief(thread_id: str, body: EmailBriefRequest, request: Request) -> dict[str, Any]:
+        """Email a finished brief to the signed-in user, or to one address they choose."""
+        try:
+            uuid.UUID(thread_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="Research thread was not found.") from exc
+        current = live_settings()
+        user_id = getattr(request.state, "user_id", None)
+        if user_id is None:
+            raise HTTPException(status_code=403, detail="Emailing a brief needs a signed-in account.")
+        account = await asyncio.to_thread(get_store().get_by_id, user_id)
+        row = await asyncio.to_thread(get_store().get_run, thread_id, user_id)
+        if account is None or row is None:
+            raise HTTPException(status_code=404, detail="Research thread was not found.")
+        if is_demo_user(account, current):
+            raise HTTPException(status_code=403, detail="The shared demo account cannot send email. Create your own account.")
+        if not current.password_reset_available:
+            raise HTTPException(status_code=503, detail="Email is not set up on this server.")
+        report = row.get("report")
+        if not report:
+            raise HTTPException(status_code=409, detail="Email is available once the report is complete.")
+        now = datetime.now(timezone.utc).timestamp()
+        recent = [t for t in app.state.email_times.get(user_id, []) if now - t < 3600]
+        if len(recent) >= EMAILS_PER_HOUR:
+            raise HTTPException(status_code=429, detail="Email limit reached. Try again in a little while.")
+        recent.append(now)
+        app.state.email_times[user_id] = recent
+        recipient = body.to or account.email
+        title = row.get("title") or row["topic"]
+        text = (
+            f"{account.full_name} sent you a research brief from Fieldwork.\n\n"
+            if recipient != account.email
+            else f"Hi {account.full_name}, here is your research brief.\n\n"
+        ) + f"{report}\n\n---\nGenerated by an AI research assistant from public web sources. Check the cited sources before relying on it.\n"
+        try:
+            await asyncio.to_thread(get_mailer().send, recipient, f"Fieldwork: {title}", text)
+        except Exception as exc:
+            logger.warning("Could not email brief %s: %s", thread_id, type(exc).__name__)
+            raise HTTPException(status_code=502, detail="The email could not be sent. Try again later.") from exc
+        return {"detail": f"Sent to {recipient}.", "to": recipient}
+
+    @app.get("/research/admin/stats")
+    async def admin_stats(request: Request) -> dict[str, Any]:
+        user_id = getattr(request.state, "user_id", None)
+        account = await asyncio.to_thread(get_store().get_by_id, user_id) if user_id else None
+        if account is None or account.email.lower() not in live_settings().admin_email_list:
+            raise HTTPException(status_code=404, detail="Not found.")
+        now = datetime.now(timezone.utc)
+        return await asyncio.to_thread(
+            get_store().admin_stats, _iso(now - timedelta(hours=24)), _iso(now - timedelta(days=7))
+        )
 
     @app.post("/research/runs/{thread_id}/share")
     async def create_share(thread_id: str, request: Request) -> dict[str, Any]:
@@ -853,6 +1038,184 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
         if row is None:
             raise HTTPException(status_code=404, detail="This shared brief does not exist or the link was turned off.")
         return row
+
+    # ------------------------------------------------------------------ recurring research
+
+    async def run_schedule(schedule: dict[str, Any]) -> None:
+        """Run one due schedule end to end (plan auto-approved) and email the result."""
+        store = get_store()
+        user_id, schedule_id = schedule["user_id"], schedule["id"]
+        user = await asyncio.to_thread(store.get_by_id, user_id)
+        if user is None:
+            return
+        current = live_settings()
+        retry_at = _iso(datetime.now(timezone.utc) + timedelta(hours=1))
+        since = _iso(datetime.now(timezone.utc) - timedelta(hours=24))
+        if current.max_runs_per_user_per_day:
+            used = await asyncio.to_thread(store.count_runs_since, user_id, since)
+            if used >= current.max_runs_per_user_per_day:
+                await asyncio.to_thread(store.finish_schedule, schedule_id, None, "waiting: daily run limit", retry_at)
+                return
+        if current.max_tokens_per_user_per_day:
+            spent = await asyncio.to_thread(store.tokens_since, user_id, since)
+            if spent >= current.max_tokens_per_user_per_day:
+                await asyncio.to_thread(store.finish_schedule, schedule_id, None, "waiting: daily token budget", retry_at)
+                return
+
+        graph, active = get_graph()
+        thread_id = str(uuid.uuid4())
+        await asyncio.to_thread(store.record_run, thread_id, user_id, schedule["topic"], schedule_id)
+        config = {"configurable": {"thread_id": thread_id}, "max_concurrency": active.max_parallel_graph_tasks}
+        start_input = {
+            "topic": schedule["topic"], "findings": [], "iteration": 0,
+            "max_iterations": schedule.get("depth") or active.max_iterations,
+        }
+
+        async def drain(response: StreamingResponse) -> list[tuple[str, dict[str, Any]]]:
+            events = []
+            async for frame in response.body_iterator:
+                parsed = _parse_sse(frame.decode() if isinstance(frame, bytes) else frame)
+                if parsed:
+                    events.append(parsed)
+            return events
+
+        events = await drain(limited_stream(graph, start_input, config, thread_id, user_id=user_id))
+        plan = next((p for n, p in events if n == "plan_review_required"), None)
+        if plan and plan.get("questions"):
+            resume = Command(resume={"questions": plan["questions"]})
+            events += await drain(
+                limited_stream(graph, resume, config, thread_id, user_id=user_id, status_on_start="researching")
+            )
+        failure = next((p for n, p in events if n == "error"), None)
+        done = next((p for n, p in events if n == "completed"), None)
+        if done is None:
+            busy = failure and failure.get("code") in {"capacity_exceeded", "run_in_progress"}
+            await asyncio.to_thread(
+                store.finish_schedule, schedule_id, thread_id, "waiting: service busy" if busy else "failed",
+                _iso(datetime.now(timezone.utc) + timedelta(minutes=10)) if busy else None,
+            )
+            return
+        await asyncio.to_thread(store.finish_schedule, schedule_id, thread_id, "complete")
+        await asyncio.to_thread(email_schedule_result, schedule, user, str(done.get("report") or ""), current)
+
+    def email_schedule_result(schedule: dict[str, Any], user: Any, report: str, current: Settings) -> None:
+        """Send the new brief (with a short 'what changed') to the account's email. Never raises."""
+        try:
+            title = _report_title(report) or schedule["topic"]
+            changes = ""
+            previous = schedule.get("last_thread_id")
+            if previous:
+                old = get_store().get_run(previous, user.id)
+                if old and old.get("report"):
+                    try:
+                        changes = summarize_changes(old["report"], report, current)
+                    except Exception:
+                        logger.warning("Could not summarize changes for schedule %s", schedule["id"])
+            excerpt = report.split("\n## Sources", 1)[0][:2_500]
+            body = (
+                f"Hi {user.full_name},\n\nYour {schedule['frequency']} Fieldwork brief is ready: {title}\n\n"
+                + (f"What changed since last time:\n{changes}\n\n" if changes else "")
+                + f"{excerpt}\n\n(Shortened. Open the full brief with its sources in Fieldwork: {current.reset_link_base}/)\n\n"
+                "To stop these emails, open Recurring research in Fieldwork and pause or delete this schedule.\n"
+            )
+            get_mailer().send(user.email, f"Fieldwork: {title}", body)
+        except Exception:
+            logger.exception("Could not email the result of schedule %s", schedule["id"])
+
+    async def run_due_schedules() -> int:
+        """Run every due schedule once. Returns how many were started."""
+        due = await asyncio.to_thread(get_store().claim_due, _iso(datetime.now(timezone.utc)), _next_run, 3)
+        for schedule in due:
+            try:
+                await run_schedule(schedule)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Scheduled run %s failed", schedule["id"])
+                await asyncio.to_thread(get_store().finish_schedule, schedule["id"], None, "failed")
+        return len(due)
+
+    async def scheduler_loop() -> None:
+        wake = app.state.scheduler_wakeup
+        while True:
+            try:
+                await run_due_schedules()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Scheduler pass failed")
+            try:
+                await asyncio.wait_for(wake.wait(), timeout=live_settings().scheduler_interval_seconds)
+            except TimeoutError:
+                pass
+            wake.clear()
+
+    def schedule_owner(request: Request) -> str:
+        user_id = getattr(request.state, "user_id", None)
+        if user_id is None:
+            raise HTTPException(status_code=403, detail="Recurring research needs a signed-in account.")
+        return user_id
+
+    def public_schedule(row: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in row.items() if key != "user_id"}
+
+    @app.get("/research/schedules")
+    async def list_schedules(request: Request) -> dict[str, Any]:
+        user_id = schedule_owner(request)
+        rows = await asyncio.to_thread(get_store().list_schedules, user_id)
+        return {"schedules": [public_schedule(r) for r in rows], "limit": live_settings().max_schedules_per_user}
+
+    @app.post("/research/schedules", status_code=201)
+    async def create_schedule(body: ScheduleRequest, request: Request) -> dict[str, Any]:
+        user_id = schedule_owner(request)
+        current = live_settings()
+        account = await asyncio.to_thread(get_store().get_by_id, user_id)
+        if account is None:
+            raise HTTPException(status_code=401, detail="Your account no longer exists. Please sign in again.")
+        if is_demo_user(account, current):
+            raise HTTPException(status_code=403, detail="The shared demo account cannot schedule research. Create your own account.")
+        if await asyncio.to_thread(get_store().count_schedules, user_id) >= current.max_schedules_per_user:
+            raise HTTPException(
+                status_code=409,
+                detail=f"You can keep up to {current.max_schedules_per_user} recurring researches. Delete one to add another.",
+            )
+        row = await asyncio.to_thread(
+            get_store().create_schedule, user_id, body.topic, body.frequency, body.max_iterations, _next_run(body.frequency)
+        )
+        return public_schedule(row)
+
+    @app.patch("/research/schedules/{schedule_id}")
+    async def patch_schedule(schedule_id: str, body: SchedulePatch, request: Request) -> dict[str, Any]:
+        user_id = schedule_owner(request)
+        store = get_store()
+        row = await asyncio.to_thread(store.get_schedule, schedule_id, user_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Schedule not found.")
+        # Resuming starts a fresh period instead of firing immediately for a long-past date.
+        await asyncio.to_thread(
+            store.update_schedule, schedule_id, user_id, enabled=body.enabled,
+            next_run_at=_next_run(row["frequency"]) if body.enabled and not row["enabled"] else None,
+        )
+        return public_schedule(await asyncio.to_thread(store.get_schedule, schedule_id, user_id))
+
+    @app.delete("/research/schedules/{schedule_id}", status_code=204)
+    async def remove_schedule(schedule_id: str, request: Request) -> Response:
+        if not await asyncio.to_thread(get_store().delete_schedule, schedule_id, schedule_owner(request)):
+            raise HTTPException(status_code=404, detail="Schedule not found.")
+        return Response(status_code=204)
+
+    @app.post("/research/schedules/{schedule_id}/run", status_code=202)
+    async def run_schedule_now(schedule_id: str, request: Request) -> dict[str, Any]:
+        user_id = schedule_owner(request)
+        store = get_store()
+        row = await asyncio.to_thread(store.get_schedule, schedule_id, user_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Schedule not found.")
+        await asyncio.to_thread(
+            store.update_schedule, schedule_id, user_id, enabled=True, next_run_at=_iso(datetime.now(timezone.utc))
+        )
+        app.state.scheduler_wakeup.set()
+        return {"detail": "Started. The new brief will appear in your history shortly."}
 
     @app.post("/research/runs/{thread_id}/ask")
     async def ask_followup(thread_id: str, body: FollowUpRequest, request: Request) -> dict[str, Any]:
@@ -933,7 +1296,10 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
         return response
 
     app.state.followup_fn = answer_followup
+    app.state.scheduler_wakeup = asyncio.Event()
+    app.state.run_due_schedules = run_due_schedules
     app.state.followup_times = {}
+    app.state.email_times = {}
     return app
 
 

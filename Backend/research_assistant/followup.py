@@ -29,24 +29,49 @@ def build_messages(report: str, question: str) -> list[Any]:
     ]
 
 
+def _make_llm(settings: Settings) -> Any:
+    if not settings.groq_api_key:
+        raise ValueError("Set GROQ_API_KEY before calling the model.")
+    return ChatGroq(
+        model=settings.groq_model,
+        api_key=settings.groq_api_key.get_secret_value(),
+        max_tokens=settings.groq_summary_max_tokens,
+        **(
+            {"reasoning_effort": "low", "reasoning_format": "hidden"}
+            if settings.groq_model in {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
+            else {}
+        ),
+    )
+
+
+def _text(message: Any) -> str:
+    content = getattr(message, "content", message)
+    if isinstance(content, str):
+        return content.strip()
+    return "".join(part.get("text", "") if isinstance(part, dict) else str(part) for part in content).strip()
+
+
 def answer_followup(report: str, question: str, settings: Settings, llm: Any | None = None) -> str:
     """Return a Markdown answer grounded in ``report`` (blocking; run in a worker thread)."""
-    if llm is None:
-        if not settings.groq_api_key:
-            raise ValueError("Set GROQ_API_KEY before asking follow-up questions.")
-        llm = ChatGroq(
-            model=settings.groq_model,
-            api_key=settings.groq_api_key.get_secret_value(),
-            max_tokens=settings.groq_summary_max_tokens,
-            **(
-                {"reasoning_effort": "low", "reasoning_format": "hidden"}
-                if settings.groq_model in {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
-                else {}
-            ),
-        )
-    message = invoke_with_retry(llm, build_messages(report, question))
-    content = getattr(message, "content", message)
-    text = content if isinstance(content, str) else "".join(
-        part.get("text", "") if isinstance(part, dict) else str(part) for part in content
+    message = invoke_with_retry(llm or _make_llm(settings), build_messages(report, question))
+    return _text(message)[:MAX_ANSWER_CHARS]
+
+
+CHANGES_PROMPT = (
+    "You compare two versions of a recurring research brief on the same topic. Write 3-6 short Markdown "
+    "bullets describing what is NEW or CHANGED in the newer brief (new facts, figures, developments, "
+    "shifts in the evidence). Do not repeat what stayed the same. If nothing material changed, say so in "
+    "one sentence. Use only the two briefs; keep the citation numbers of the newer brief."
+)
+
+
+def summarize_changes(old_report: str, new_report: str, settings: Settings, llm: Any | None = None) -> str:
+    """Short 'what changed since last time' note for a recurring brief."""
+    message = invoke_with_retry(
+        llm or _make_llm(settings),
+        [
+            SystemMessage(content=CHANGES_PROMPT),
+            HumanMessage(content=f"Previous brief:\n{old_report[:6000]}\n\nNewer brief:\n{new_report[:6000]}"),
+        ],
     )
-    return text.strip()[:MAX_ANSWER_CHARS]
+    return _text(message)[:2_000]

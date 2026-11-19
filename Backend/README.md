@@ -169,3 +169,26 @@ The writer receives a short excerpt of each numbered source, not only the resear
 - With `REQUIRE_EMAIL_VERIFICATION=true`, `POST /auth/register` emails a single-use link (`/#/verify?token=...`), `POST /auth/verify-email` confirms it, `POST /auth/resend-verification` sends a new one, and starting a run returns 403 until the account is confirmed. Existing accounts are treated as confirmed. Without SMTP in production the setting has no effect, so nobody is locked out.
 
 Every response carries an `X-Request-ID` header and each request is logged as one line with that id, so a user-reported failure can be traced in the server logs.
+
+## Recurring research
+
+`GET/POST /research/schedules`, `PATCH/DELETE /research/schedules/{id}` and `POST /research/schedules/{id}/run` manage per-user schedules (daily, weekly or monthly; `MAX_SCHEDULES_PER_USER`, default 2; the shared demo account cannot schedule). A background task wakes every `SCHEDULER_INTERVAL_SECONDS`, claims due schedules atomically, runs each with the plan auto-approved, then emails the brief with an AI-written "what changed since last time" note (needs SMTP). Scheduled runs count against the daily run and token limits; when a limit is reached the schedule waits and retries in an hour. The scheduler runs in the API process, so it only fires while the service is awake.
+
+## Token budget and source filtering
+
+`MAX_TOKENS_PER_USER_PER_DAY` (0 = unlimited) refuses new runs and plan approvals with HTTP 429 once a user has spent that many tokens in 24 hours. Search results are filtered in `sources.py`: duplicate URLs (ignoring tracking parameters), pages with almost no text and `BLOCKED_DOMAINS` are dropped, and the rest are ranked by search score plus a bonus for `.gov/.edu/.int` and `PREFERRED_DOMAINS` hosts. If filtering would remove everything, the original top results are used.
+
+## Report options, claim check and own sources
+
+`POST /research` accepts an optional `options` object: `style` (brief, executive, deep, comparison), `audience`, `length`, `language`, `time_range` (day/week/month/year), `urls` (up to 5 pages you want used as sources), `notes` (pasted text treated as a source) and `verify_claims`.
+Results are filtered by `BLOCKED_DOMAINS` / `PREFERRED_DOMAINS`. With `CLAIM_CHECK=true` (default) a second model call marks unsupported sentences `*(unverified)*`; failures are ignored. Disable per run with `verify_claims: false` to save tokens.
+
+## Accounts and admin
+
+- `INVITE_CODES` (comma-separated): registration requires one of them.
+- `ADMIN_EMAILS`: these users can open `GET /research/admin/stats` (users, runs, tokens, feedback), shown as the Admin button in the app.
+- `POST /research/runs/{id}/email` emails a brief (10/hour/user, needs SMTP); `PUT /research/runs/{id}/tags` sets tags used by history search.
+
+## Frontend tests
+
+`cd frontend && npm test` (Node 22.6+). Add `npm test` as a CI step next to `ruff check .`.

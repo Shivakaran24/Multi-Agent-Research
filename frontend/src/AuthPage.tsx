@@ -4,7 +4,7 @@ import Logo from './Logo'
 import SampleReport from './SampleReport'
 
 type Mode = 'login' | 'register' | 'forgot' | 'reset'
-type Fields = { fullName: string; email: string; password: string; confirm: string }
+type Fields = { fullName: string; email: string; password: string; confirm: string; invite: string }
 type FieldErrors = Partial<Record<keyof Fields, string>>
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -43,7 +43,7 @@ export default function AuthPage() {
   const [mode, setMode] = useState<Mode>(initial.mode)
   const [resetToken, setResetToken] = useState(initial.token)
   const [config, setConfig] = useState<ServerAuthConfig | null>(null)
-  const [fields, setFields] = useState<Fields>({ fullName: '', email: '', password: '', confirm: '' })
+  const [fields, setFields] = useState<Fields>({ fullName: '', email: '', password: '', confirm: '', invite: '' })
   const [errors, setErrors] = useState<FieldErrors>({})
   const [formError, setFormError] = useState('')
   const [flash, setFlash] = useState('')
@@ -89,7 +89,7 @@ export default function AuthPage() {
     if (Object.keys(found).length) return
     setBusy(true)
     try {
-      if (mode === 'register') await register(fields.fullName.trim(), fields.email.trim(), fields.password)
+      if (mode === 'register') await register(fields.fullName.trim(), fields.email.trim(), fields.password, fields.invite.trim())
       else if (mode === 'login') await login(fields.email.trim(), fields.password)
       else if (mode === 'forgot') setSent(await forgotPassword(fields.email.trim()))
       else {
@@ -156,6 +156,11 @@ export default function AuthPage() {
             <label htmlFor="email">Email</label>
             <input id="email" type="email" inputMode="email" autoComplete="email" autoFocus={!isRegister} maxLength={254} placeholder="you@example.com" value={fields.email} onChange={e => update('email', e.target.value)} {...invalid('email')} />
             {fieldError('email')}
+          </div>}
+
+          {isRegister && config?.invite_required && <div className="auth-field">
+            <label htmlFor="invite">Invite code</label>
+            <input id="invite" autoComplete="off" maxLength={100} placeholder="Ask the site owner for a code" value={fields.invite} onChange={e => update('invite', e.target.value)} />
           </div>}
 
           {mode !== 'forgot' && passwordField(mode === 'reset' ? 'New password' : 'Password', 'password', mode === 'login' ? 'current-password' : 'new-password', mode === 'reset')}

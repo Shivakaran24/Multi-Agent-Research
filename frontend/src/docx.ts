@@ -8,6 +8,9 @@ import { marked, type Token, type Tokens } from 'marked'
 const enc = new TextEncoder()
 const esc = (text: string) => text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
+/** marked's lexer keeps inline text HTML-escaped; Word needs the plain characters (esc() escapes for XML). */
+const plain = (text: string) => text.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
+
 type Style = { b?: boolean; i?: boolean; code?: boolean; link?: boolean }
 
 class Builder {
@@ -31,7 +34,7 @@ class Builder {
       switch (token.type) {
         case 'strong': return this.inline((token as Tokens.Strong).tokens, { ...style, b: true })
         case 'em': return this.inline((token as Tokens.Em).tokens, { ...style, i: true })
-        case 'codespan': return this.run((token as Tokens.Codespan).text, { ...style, code: true })
+        case 'codespan': return this.run(plain((token as Tokens.Codespan).text), { ...style, code: true })
         case 'br': return '<w:r><w:br/></w:r>'
         case 'del': return this.inline((token as Tokens.Del).tokens, style)
         case 'link': {
@@ -43,9 +46,9 @@ class Builder {
         }
         case 'text': {
           const t = token as Tokens.Text
-          return t.tokens?.length ? this.inline(t.tokens, style) : this.run(t.text, style)
+          return t.tokens?.length ? this.inline(t.tokens, style) : this.run(plain(t.text), style)
         }
-        case 'escape': return this.run((token as Tokens.Escape).text, style)
+        case 'escape': return this.run(plain((token as Tokens.Escape).text), style)
         default: return this.run('raw' in token ? String(token.raw) : '', style)
       }
     }).join('')

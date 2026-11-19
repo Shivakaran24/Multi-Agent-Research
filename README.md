@@ -43,6 +43,9 @@ Accounts support password change and email reset (set `SMTP_*`; without SMTP, pr
 - Thumbs up/down on each brief, and a private-by-default read-only share link that the owner can turn off at any time.
 - Word (.docx) export built in the browser, alongside Markdown, HTML and print/PDF.
 - Optional email verification (`REQUIRE_EMAIL_VERIFICATION=true`, needs SMTP in production): new accounts must confirm their address before starting research.
+- Daily token budget per user (`MAX_TOKENS_PER_USER_PER_DAY`) with a live "tokens left" counter, next to the daily run limit.
+- Source filtering: duplicates, thin pages and junk domains are dropped, and authoritative hosts (.gov, .edu, .int, plus a preferred list) rank higher. `SEARCH_TIME_RANGE` limits results to recent pages.
+- Recurring research: schedule a topic daily, weekly or monthly; each run is emailed with a short "what changed" note and tagged AUTO in history.
 - Live progress lines show what each researcher found while a run is going.
 
 ## Testing

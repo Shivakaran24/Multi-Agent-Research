@@ -2,6 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } fr
 import VisualContext from './VisualContext'
 import FollowUp from './FollowUp'
 import ReportActions from './ReportActions'
+import Schedules from './Schedules'
+import ResearchOptionsPanel from './ResearchOptionsPanel'
+import AdminPage from './AdminPage'
+import { applyTheme, currentTheme } from './theme'
+import CitationArticle from './CitationArticle'
+import { composeTopic, DEFAULT_OPTIONS, optionsProblem, toRequestOptions, type Options } from './options'
 import SharedView from './SharedView'
 import VerifyEmail from './VerifyEmail'
 import VerifyBanner from './VerifyBanner'
@@ -58,6 +64,7 @@ function Workspace({ session }: { session: Session }) {
   const { token, user } = session
   const [topic, setTopic] = useState('')
   const [showSettings, setShowSettings] = useState(false)
+  const [showSchedules, setShowSchedules] = useState(false)
   const [phase, setPhase] = useState<Phase>('idle')
   const [thread, setThread] = useState('')
   const [questions, setQuestions] = useState<Question[]>([])
@@ -70,6 +77,11 @@ function Workspace({ session }: { session: Session }) {
   const [runs, setRuns] = useState<RunSummary[]>([])
   const [usage, setUsage] = useState<Usage | null>(null)
   const [depth, setDepth] = useState<number | null>(null)
+  const [opts, setOpts] = useState<Options>(DEFAULT_OPTIONS)
+  const [query, setQuery] = useState('')
+  const [tagFilter, setTagFilter] = useState('')
+  const [showAdmin, setShowAdmin] = useState(false)
+  const [dark, setDark] = useState(() => currentTheme() === 'dark')
   const [interruptedNote, setInterruptedNote] = useState('')
   const abortRef = useRef<AbortController | null>(null)
   const streamedRef = useRef(false) // true once the current request has produced any event
@@ -147,8 +159,10 @@ function Workspace({ session }: { session: Session }) {
 
   async function startResearch() {
     if (!topic.trim() || busy) return
+    const problem = optionsProblem(opts)
+    if (problem) { setError(problem); return }
     setError(''); setNotice(''); setReport(''); setEvents([]); setThread(''); setIterations(0); setActiveStep(''); setPhase('planning')
-    await run(signal => fetch(`${API}/research/runs`, { method: 'POST', headers: headers(), signal, body: JSON.stringify({ topic: topic.trim(), max_iterations: effectiveDepth }) }))
+    await run(signal => fetch(`${API}/research/runs`, { method: 'POST', headers: headers(), signal, body: JSON.stringify({ topic: composeTopic(topic, opts), max_iterations: effectiveDepth, options: toRequestOptions(opts) }) }))
   }
   async function approvePlan() {
     if (!thread) return
@@ -212,6 +226,12 @@ function Workspace({ session }: { session: Session }) {
     return () => window.removeEventListener('keydown', onKey)
   })
 
+  const tokensLeft = usage?.token_limit ? Math.max(usage.token_limit - (usage.tokens_today ?? 0), 0) : null
+  const allTags = useMemo(() => Array.from(new Set(runs.flatMap(r => r.tags ?? []))).slice(0, 10), [runs])
+  const visibleRuns = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return runs.filter(r => (!tagFilter || (r.tags ?? []).includes(tagFilter)) && (!q || `${r.title ?? ''} ${r.topic} ${(r.tags ?? []).join(' ')}`.toLowerCase().includes(q)))
+  }, [runs, query, tagFilter])
   const currentTokens = runs.find(item => item.thread_id === thread)?.tokens_used ?? 0
   const remaining = usage?.daily_limit ? Math.max(usage.daily_limit - usage.used_today, 0) : null
 
@@ -221,24 +241,29 @@ function Workspace({ session }: { session: Session }) {
       <button className="new-research" onClick={reset}><span>＋</span> New research <kbd>{/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘ K' : 'Ctrl K'}</kbd></button>
       <div className="side-label">YOUR WORKSPACE</div>
       <button className="nav-item selected"><span>▦</span> Research desk</button>
+      <button className="nav-item" onClick={() => setShowSchedules(true)}><span>↻</span> Recurring research</button>
       <div className="side-label recent-label">RECENT RESEARCH <span>{runs.length || ''}</span></div>
       {runs.length === 0 && <div className="empty-history">Your research will appear here.</div>}
+      {runs.length > 4 && <input className="history-search" type="search" aria-label="Search your research" placeholder="Search research…" value={query} onChange={e => setQuery(e.target.value)} />}
+      {allTags.length > 0 && <div className="tag-filter" aria-label="Filter by tag">{allTags.map(t => <button key={t} type="button" className={t === tagFilter ? 'on' : ''} onClick={() => setTagFilter(t === tagFilter ? '' : t)}>{t}</button>)}</div>}
+      {runs.length > 0 && visibleRuns.length === 0 && <div className="empty-history">Nothing matches.</div>}
       <nav className="history-list" aria-label="Research history">
-        {runs.map(item => <div className={`history-row ${item.thread_id === thread ? 'active' : ''}`} key={item.thread_id}>
+        {visibleRuns.map(item => <div className={`history-row ${item.thread_id === thread ? 'active' : ''}`} key={item.thread_id}>
           <button className="history-item" disabled={busy} onClick={() => openRun(item.thread_id)} title={item.topic}>
-            <span className={`recent-dot ${item.status}`} /><span className="history-text">{item.title || item.topic}</span>{TAGS[item.status] && <span className={`history-tag ${item.status}`}>{TAGS[item.status]}</span>}
+            <span className={`recent-dot ${item.status}`} /><span className="history-text">{item.title || item.topic}</span>{item.schedule_id && <span className="history-tag auto">AUTO</span>}{TAGS[item.status] && <span className={`history-tag ${item.status}`}>{TAGS[item.status]}</span>}
           </button>
           <button className="history-delete" disabled={busy} aria-label={`Delete ${item.title || item.topic}`} onClick={() => removeRun(item)}>×</button>
         </div>)}
       </nav>
       <div className="sidebar-bottom">
+        {user.is_admin && <button className="nav-item" onClick={() => setShowAdmin(true)}><span>◫</span> Admin</button>}
         <div className="security-note"><span className="shield">◇</span><div><strong>Private by design</strong><small>Only you can open your runs.</small></div></div>
         <button className="profile" onClick={() => setShowSettings(true)}><span className="avatar">{user.full_name.charAt(0).toUpperCase()}</span><span className="profile-name"><span className="profile-name-text">{user.full_name}</span><small>Account &amp; sign out</small></span><span className="more">•••</span></button>
       </div>
     </aside>
 
     <main className="main">
-      {user.email_verified === false && <VerifyBanner token={token} email={user.email} />}<header className="topbar"><div className="breadcrumb">Workspace <span>/</span> Research desk</div><div className="top-actions"><div className="secure-label"><i /> Secure connection</div><button className="icon-button" aria-label="Settings" onClick={() => setShowSettings(true)}>⚙</button><button className="help-button" onClick={() => window.open(HELP_URL, '_blank', 'noopener,noreferrer')}>Help <span>↗</span></button></div></header>
+      {user.email_verified === false && <VerifyBanner token={token} email={user.email} />}<header className="topbar"><div className="breadcrumb">Workspace <span>/</span> Research desk</div><div className="top-actions"><div className="secure-label"><i /> Secure connection</div><button className="icon-button" aria-label={dark ? 'Switch to light mode' : 'Switch to dark mode'} title="Toggle dark mode" onClick={() => { applyTheme(dark ? 'light' : 'dark', true); setDark(!dark) }}>{dark ? '☀' : '☾'}</button><button className="icon-button" aria-label="Settings" onClick={() => setShowSettings(true)}>⚙</button><button className="help-button" onClick={() => window.open(HELP_URL, '_blank', 'noopener,noreferrer')}>Help <span>↗</span></button></div></header>
       <div className="content-wrap">
         <div className="eyebrow"><span className="eyebrow-line" /> RESEARCH, WITH RIGOR</div>
         <h1>{phase === 'complete' ? 'Your brief is ready.' : phase === 'review' ? 'Review your research plan.' : phase === 'interrupted' ? 'Pick up where you left off.' : busy ? 'The work is underway.' : 'Make sense of the complex.'}</h1>
@@ -247,8 +272,9 @@ function Workspace({ session }: { session: Session }) {
         {phase === 'idle' || phase === 'error' ? <section className="composer">
           <label htmlFor="topic">What would you like to understand?</label>
           <textarea id="topic" maxLength={2000} placeholder="Ask a question, explore a market, or investigate a topic…" value={topic} onChange={e => setTopic(e.target.value)} onKeyDown={e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') startResearch() }} />
+          <ResearchOptionsPanel value={opts} onChange={setOpts} />
           <div className="composer-footer"><span className="composer-options"><span className="sparkle">✳</span> Multi-agent research <span className="separator">·</span><label className="depth-picker">Depth <select aria-label="Research depth" value={effectiveDepth} onChange={e => setDepth(Number(e.target.value))}>{depthOptions.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}</select></label></span><button className="start-button" disabled={!topic.trim()} onClick={startResearch}>Start research <span>↗</span></button></div>
-          {usage && (remaining !== null || !!usage.tokens_today) && <div className={`usage-line ${remaining === 0 ? 'out' : ''}`}>{remaining !== null && <><strong>{remaining} of {usage.daily_limit} runs left today</strong>{remaining === 0 ? ' · resets on a rolling 24-hour basis' : ' · deeper runs use more of your search and model quota'}</>}{!!usage.tokens_today && <>{remaining !== null ? ' · ' : ''}{formatTokens(usage.tokens_today)} tokens used today</>}</div>}
+          {usage && (remaining !== null || !!usage.tokens_today || !!usage.token_limit) && <div className={`usage-line ${remaining === 0 || tokensLeft === 0 ? 'out' : ''}`}>{remaining !== null && <><strong>{remaining} of {usage.daily_limit} runs left today</strong>{remaining === 0 ? ' · resets on a rolling 24-hour basis' : ''}</>}{tokensLeft !== null ? <>{remaining !== null ? ' · ' : ''}<strong>{formatTokens(tokensLeft)} of {formatTokens(usage.token_limit!)} tokens left</strong></> : !!usage.tokens_today && <>{remaining !== null ? ' · ' : ''}{formatTokens(usage.tokens_today)} tokens used today</>}</div>}
           {notice && <div className="notice-box" role="status">{notice}</div>}
           {error && <div className="error-box"><span>!</span> {error}</div>}
         </section> : null}
@@ -259,7 +285,7 @@ function Workspace({ session }: { session: Session }) {
 
         {busy && <section className="progress-card"><div className="progress-title"><span className="pulse" /><div><strong>Research in progress</strong><small>{thread ? `Run ${thread.slice(0, 8)} · ` : ''}{iterations ? `Review round ${iterations}` : 'Your team is working through the evidence'}</small></div><span className="live-tag">LIVE</span><button className="cancel-button" onClick={cancel}>Cancel</button></div><div className="steps">{steps.map((step, i) => { const active = activeStep === step.id; const done = steps.findIndex(s => s.id === activeStep) > i || (phase === 'writing' && i < 3); return <div className={`step ${active ? 'active' : ''} ${done ? 'done' : ''}`} key={step.id}><span className="step-icon">{done ? '✓' : active && busy ? <span className="spinner" /> : step.icon}</span><span className="step-copy"><strong>{step.label}</strong><small>{step.detail}</small></span><span className="step-state">{done ? 'COMPLETE' : active ? 'IN PROGRESS' : 'UP NEXT'}</span></div> })}</div>{events.length > 0 && <div className="activity-feed" aria-live="polite">{events.slice(0, 4).map((e, i) => <div className={`activity-line ${i ? 'older' : ''}`} key={`${events.length - i}-${e}`}><span className="activity-pip" />{e}</div>)}</div>}</section>}
 
-        {phase === 'complete' && <section className="report-card"><div className="report-toolbar"><div className="report-label"><span className="report-check">✓</span><div><strong>Research brief</strong><small>Completed · {iterations || 1} evidence review{(iterations || 1) === 1 ? '' : 's'}{!!currentTokens && ` · ${formatTokens(currentTokens)} tokens`}</small></div></div><div className="report-actions"><ExportMenu markdown={report} view={view} topic={topic} /><button className="copy-button" onClick={() => navigator.clipboard.writeText(report).catch(() => setError('Clipboard access is unavailable.'))}>Copy brief <span>▣</span></button></div></div><article className="markdown" dangerouslySetInnerHTML={{ __html: view.html }} />{view.sources.length > 0 && <section className="sources" aria-label="Sources"><h3>Sources</h3><ol>{view.sources.map(source => <li key={source.n} value={source.n}><a href={source.url} target="_blank" rel="noopener noreferrer">{source.title}</a><small>{hostOf(source.url)}</small></li>)}</ol></section>}<ReportActions token={token} thread={thread} /><FollowUp token={token} thread={thread} /><VisualContext api={API} token={token} thread={thread} /></section>}
+        {phase === 'complete' && <section className="report-card"><div className="report-toolbar"><div className="report-label"><span className="report-check">✓</span><div><strong>Research brief</strong><small>Completed · {iterations || 1} evidence review{(iterations || 1) === 1 ? '' : 's'}{!!currentTokens && ` · ${formatTokens(currentTokens)} tokens`}</small></div></div><div className="report-actions"><ExportMenu markdown={report} view={view} topic={topic} /><button className="copy-button" onClick={() => navigator.clipboard.writeText(report).catch(() => setError('Clipboard access is unavailable.'))}>Copy brief <span>▣</span></button></div></div><CitationArticle html={view.html} sources={view.sources} />{view.sources.length > 0 && <section className="sources" aria-label="Sources"><h3>Sources</h3><ol>{view.sources.map(source => <li key={source.n} value={source.n}><a href={source.url} target="_blank" rel="noopener noreferrer">{source.title}</a><small>{hostOf(source.url)}</small></li>)}</ol></section>}<ReportActions token={token} thread={thread} onChanged={refreshRuns} /><FollowUp token={token} thread={thread} /><VisualContext api={API} token={token} thread={thread} /></section>}
 
         <div className="trust-row"><span>BUILT FOR THOUGHTFUL WORK</span><i /><span>Human-reviewed plan</span><i /><span>Evidence checked</span><i /><span>Every claim traceable</span></div>
         {phase === 'idle' && <div className="example-prompts"><div className="example-heading">A few places to start <span>↘</span></div><div className="prompt-grid">{['How is AI changing clinical drug discovery?', 'What is driving the next wave of grid storage?', 'How are cities adapting to extreme heat?'].map((prompt, i) => <button key={prompt} onClick={() => setTopic(prompt)}><span className="prompt-index">0{i + 1}</span><span>{prompt}</span><span className="prompt-arrow">↗</span></button>)}</div></div>}
@@ -267,6 +293,8 @@ function Workspace({ session }: { session: Session }) {
       <footer className="footer"><span>FIELDWORK <span className="footer-dot">·</span> RESEARCH, MADE CLEAR</span><span>Thoughtful answers start with better questions.</span></footer>
     </main>
 
+    {showAdmin && <AdminPage token={token} onClose={() => setShowAdmin(false)} />}
+    {showSchedules && <Schedules token={token} onClose={() => setShowSchedules(false)} onOpenRun={id => void openRun(id)} onChanged={refreshRuns} />}
     {showSettings && <div className="modal-backdrop" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) setShowSettings(false) }}><section className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title"><Account user={user} onClose={() => setShowSettings(false)} /></section></div>}
   </div>
 }

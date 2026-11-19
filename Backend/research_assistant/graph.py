@@ -73,11 +73,14 @@ def build_research_graph(
         validated = ResearchPlan.model_validate({"questions": edited_questions})
         return {"plan": [question.model_dump(mode="json") for question in validated.questions]}
 
+    def worker_input(state: ResearchState, query: str) -> dict[str, Any]:
+        payload: dict[str, Any] = {"query": query}
+        if time_range := (state.get("options") or {}).get("time_range"):
+            payload["time_range"] = time_range
+        return payload
+
     def route_after_plan(state: ResearchState) -> list[Send]:
-        return [
-            Send("researcher", {"query": item["question"]})
-            for item in state["plan"]
-        ]
+        return [Send("researcher", worker_input(state, item["question"])) for item in state["plan"]]
 
     def route_after_review(state: ResearchState) -> str | list[Send]:
         if state.get("sufficient") or state.get("iteration", 0) >= state.get(
@@ -87,7 +90,7 @@ def build_research_graph(
         gaps = state.get("gaps", [])
         if not gaps:
             return "writer"
-        return [Send("researcher", {"query": item["question"]}) for item in gaps]
+        return [Send("researcher", worker_input(state, item["question"])) for item in gaps]
 
     builder = StateGraph(ResearchState)
     builder.add_node("lead_planner", lead_node)

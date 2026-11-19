@@ -45,6 +45,8 @@ services:
       # Showcase limits: protect your Groq/Tavily quota from a public link.
       - key: MAX_RUNS_PER_USER_PER_DAY
         value: "5"
+      - key: MAX_TOKENS_PER_USER_PER_DAY
+        value: "150000"
       - key: MAX_ACTIVE_RUNS_PER_USER
         value: "1"
       - key: MAX_CONCURRENT_RUNS
