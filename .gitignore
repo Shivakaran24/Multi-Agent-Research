@@ -1,0 +1,19 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+!.env.production.example
+Backend/.env
+
+# Python
+__pycache__/
+*.py[cod]
+Backend/.venv/
+Backend/.pip-temp/
+Backend/data/
+*.egg-info/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/

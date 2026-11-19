@@ -1,0 +1,32 @@
+"""Model output that overshoots a length cap is trimmed, not fatal."""
+
+from research_assistant.schemas import FinalReport, ResearchQuestion, ResearchSummary, ReviewDecision
+
+
+def test_overlong_summary_is_trimmed_at_a_sentence():
+    text = ("Evidence shows heat adaptation is uneven. " * 30).strip()
+    out = ResearchSummary.model_validate({"summary": text + "\n"}).summary
+    assert len(out) <= 2000 and out.endswith(".")
+
+
+def test_trims_on_word_boundary_when_no_sentence_break():
+    out = ResearchSummary.model_validate({"summary": "word " * 900}).summary
+    assert len(out) <= 2000 and out.endswith("…") and "wor…" not in out
+
+
+def test_short_values_pass_through_stripped():
+    assert ResearchSummary.model_validate({"summary": " ok \n"}).summary == "ok"
+
+
+def test_other_llm_fields_are_trimmed():
+    q = ResearchQuestion.model_validate({"question": "Why? " * 100, "rationale": "x " * 300})
+    assert len(q.question) <= 240 and len(q.rationale) <= 240
+    assert len(ReviewDecision.model_validate({"sufficient": True, "rationale": "a " * 400}).rationale) <= 300
+    r = FinalReport.model_validate({"title": "T" * 500, "markdown": "para\n\n" * 5000})
+    assert len(r.title) <= 120 and len(r.markdown) <= 12000
+
+
+def test_too_short_question_still_rejected():
+    import pytest
+    with pytest.raises(Exception):
+        ResearchQuestion.model_validate({"question": "hi", "rationale": ""})

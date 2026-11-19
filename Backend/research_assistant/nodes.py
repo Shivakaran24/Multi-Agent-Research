@@ -1,0 +1,326 @@
+"""Concrete planner, researcher, reviewer, and writer node implementations."""
+
+from __future__ import annotations
+
+import json
+import random
+import re
+import time
+from collections.abc import Callable
+from functools import lru_cache
+from typing import Any, TypedDict
+
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_groq import ChatGroq
+from tavily import TavilyClient
+
+from research_assistant.config import Settings
+from research_assistant.schemas import (
+    FinalReport,
+    ResearchFinding,
+    ResearchPlan,
+    ResearchSummary,
+    ReviewDecision,
+    Source,
+)
+from research_assistant.state import ResearcherWorkerState, ResearchState
+
+SearchFn = Callable[[str], list[dict[str, Any]]]
+NodeFn = Callable[[Any], dict[str, Any]]
+
+
+class NodeImplementations(TypedDict):
+    lead_planner_node: NodeFn
+    researcher_node: NodeFn
+    reviewer_node: NodeFn
+    writer_node: NodeFn
+
+
+def _citation_context(findings: list[ResearchFinding]) -> tuple[str, str]:
+    """Build evidence with stable citation numbers and a deterministic bibliography."""
+    unique_sources: dict[str, Source] = {}
+    citation_by_url: dict[str, int] = {}
+    finding_rows: list[dict[str, Any]] = []
+    for finding in findings:
+        citation_ids: list[int] = []
+        for source in finding.sources:
+            url = str(source.url)
+            if url not in unique_sources:
+                unique_sources[url] = source
+                citation_by_url[url] = len(unique_sources)
+            citation_ids.append(citation_by_url[url])
+        finding_rows.append(
+            {"query": finding.query, "summary": finding.summary, "cite_with": sorted(set(citation_ids))}
+        )
+
+    source_rows = [
+        {"citation": index, "title": source.title, "url": url}
+        for index, (url, source) in enumerate(unique_sources.items(), start=1)
+    ]
+    context = json.dumps(
+        {"findings": finding_rows, "sources": source_rows},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    bibliography = "\n".join(
+        f"[{index}] {source.title} — {url}"
+        for index, (url, source) in enumerate(unique_sources.items(), start=1)
+    )
+    return context, bibliography
+
+
+def _with_structured_output(model: Any, schema: Any) -> Any:
+    """Use constrained JSON output on Groq models that guarantee schema adherence."""
+    try:
+        model_name = getattr(model, "model_name", getattr(model, "model", ""))
+        strict = model_name in {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
+        return model.with_structured_output(schema, method="json_schema", strict=strict)
+    except Exception:
+        return model.with_structured_output(schema)
+
+
+def _invoke_with_rate_limit_retry(runnable: Any, messages: list[Any]) -> Any:
+    """Retry transient Groq 429 responses while respecting the provider's wait hint."""
+    max_retries = 5
+    for attempt in range(max_retries + 1):
+        try:
+            return runnable.invoke(messages)
+        except Exception as exc:
+            status_code = getattr(exc, "status_code", None)
+            if status_code is None:
+                status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code != 429 or attempt >= max_retries:
+                raise
+
+            retry_after = None
+            response = getattr(exc, "response", None)
+            headers = getattr(response, "headers", {}) or {}
+            try:
+                retry_after = float(headers.get("retry-after", "")) or None
+            except (TypeError, ValueError):
+                pass
+            if retry_after is None:
+                match = re.search(r"try again in ([0-9.]+)\s*(ms|milliseconds?|s|seconds?)", str(exc), re.I)
+                if match:
+                    retry_after = float(match.group(1))
+                    if match.group(2).lower().startswith("m"):
+                        retry_after /= 1_000
+
+            wait_seconds = min(30.0, (retry_after or 1.0) * (2**attempt))
+            time.sleep(wait_seconds + random.uniform(0, min(0.25, wait_seconds * 0.1)))
+
+
+def create_node_implementations(
+    *,
+    settings: Settings | None = None,
+    llm: Any | None = None,
+    fast_llm: Any | None = None,
+    search: SearchFn | None = None,
+) -> NodeImplementations:
+    """Create injectable nodes; defaults use Groq and Tavily from environment settings."""
+    settings = settings or Settings()
+    using_default_model = llm is None
+    if llm is None:
+        if not settings.groq_api_key:
+            raise ValueError("Set GROQ_API_KEY before creating the default language model.")
+        reasoning_options = (
+            {"reasoning_effort": "low", "reasoning_format": "hidden"}
+            if settings.groq_model in {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
+            else {}
+        )
+        llm = ChatGroq(
+            model=settings.groq_model,
+            api_key=settings.groq_api_key.get_secret_value(),
+            max_tokens=settings.groq_max_output_tokens,
+            **reasoning_options,
+        )
+    if fast_llm is None and using_default_model:
+        fast_llm = ChatGroq(
+            model=settings.groq_model,
+            api_key=settings.groq_api_key.get_secret_value(),
+            max_tokens=settings.groq_summary_max_tokens,
+            **reasoning_options,
+        )
+    fast_llm = fast_llm or llm
+
+    if search is None:
+        if not settings.tavily_api_key:
+            raise ValueError("Set TAVILY_API_KEY before creating the default search client.")
+        tavily = TavilyClient(api_key=settings.tavily_api_key.get_secret_value())
+
+        def search(query: str) -> list[dict[str, Any]]:
+            result = tavily.search(
+                query=query,
+                search_depth="basic",
+                max_results=settings.search_results_per_query,
+                include_raw_content=False,
+            )
+            return result.get("results", [])
+
+    def lead_planner_node(state: ResearchState) -> dict[str, Any]:
+        """Break the topic into a small set of focused, non-overlapping questions."""
+        if state.get("gaps"):
+            questions = state["gaps"]
+        else:
+            planner = _with_structured_output(llm, ResearchPlan)
+            plan = _invoke_with_rate_limit_retry(
+                planner,
+                [
+                    SystemMessage(
+                        content=(
+                            "You are a lead research strategist. Break the user's topic into "
+                            f"{settings.initial_questions} distinct, focused questions that cover "
+                            "key facts, relevant context, and multiple credible perspectives. "
+                            "Respond in valid JSON matching the schema. "
+                            "Each question must be independently researchable and include a rationale."
+                        )
+                    ),
+                    HumanMessage(content=f"Research topic: {state['topic']}"),
+                ]
+            )
+            questions = plan.questions[: settings.initial_questions]
+        return {
+            "plan": [question.model_dump(mode="json") for question in questions],
+            "gaps": [],
+        }
+
+    def researcher_node(worker: ResearcherWorkerState) -> dict[str, Any]:
+        """Search Tavily for one query and synthesize its source-backed evidence."""
+        query = worker["query"]
+        results = search(query)
+        sources: list[Source] = []
+        for result in results:
+            url = result.get("url")
+            if not url:
+                continue
+            try:
+                sources.append(
+                    Source(
+                        title=str(result.get("title") or "Untitled"),
+                        url=url,
+                        snippet=str(result.get("content") or result.get("snippet") or "")[:240],
+                        content=str(result.get("content") or result.get("snippet") or "")[: settings.source_excerpt_chars],
+                    )
+                )
+            except ValueError:
+                # Ignore malformed URLs; a citation must be usable by the writer.
+                continue
+
+        context = "\n\n".join(
+            f"{source.title} ({source.url}): {source.content or source.snippet}"
+            for source in sources
+        ) or "No usable search results were returned."
+        summarizer = _with_structured_output(fast_llm, ResearchSummary)
+        summary = _invoke_with_rate_limit_retry(
+            summarizer,
+            [
+                SystemMessage(
+                    content=(
+                            "Answer the query using only the supplied sources. Write a substantive evidence summary of "
+                            "2-3 short paragraphs (roughly 1000-1600 characters): include concrete facts, figures, "
+                            "named places/organizations and dates the sources give, note where sources disagree, "
+                            "and flag uncertainty. Return the required JSON; do not invent facts or citations."
+                    )
+                ),
+                HumanMessage(content=f"Query: {query}\n\nSearch results:\n{context}"),
+            ]
+        )
+        summary_text = summary.summary
+
+        finding = ResearchFinding(query=query, summary=summary_text, sources=sources)
+        return {"findings": [finding]}
+
+    def reviewer_node(state: ResearchState) -> dict[str, Any]:
+        """Judge evidence quality and request focused follow-up questions where needed."""
+        findings_text = "\n\n".join(
+            f"{finding.query}: {finding.summary[:900]} "
+            f"Sources: {[str(source.url) for source in finding.sources[:4]]}"
+            for finding in state.get("findings", [])
+        )
+        reviewer = _with_structured_output(llm, ReviewDecision)
+        decision = _invoke_with_rate_limit_retry(
+            reviewer,
+            [
+                SystemMessage(
+                    content=(
+                        "Check whether evidence answers the topic, citations support claims, or sources conflict. "
+                        "Return the required JSON. Request up to 2 focused follow-up questions only for important gaps."
+                    ),
+                ),
+                HumanMessage(
+                    content=(
+                        f"Main topic: {state['topic']}\n"
+                        f"Iteration {state.get('iteration', 0) + 1}/"
+                        f"{state.get('max_iterations', settings.max_iterations)}. Evidence:\n{findings_text}"
+                    ),
+                ),
+            ]
+        )
+
+        return {
+            "review_notes": decision.rationale,
+            "gaps": [gap.model_dump(mode="json") for gap in decision.gaps] if not decision.sufficient else [],
+            "sufficient": decision.sufficient,
+            "iteration": state.get("iteration", 0) + 1,
+        }
+
+    def writer_node(state: ResearchState) -> dict[str, Any]:
+        """Synthesize findings into a report and append a deterministic source list."""
+        evidence, bibliography = _citation_context(state.get("findings", []))
+        writer = _with_structured_output(llm, FinalReport)
+        report = _invoke_with_rate_limit_retry(
+            writer,
+            [
+                SystemMessage(
+                    content=(
+                        "Write a thorough, well-organized Markdown research brief (roughly 5000-8000 characters) "
+                        "answering the topic using only the supplied evidence. Use this structure: a short "
+                        "'Key takeaways' bullet list, then one '##' section per major theme with specific facts, "
+                        "figures, examples and comparisons, then '## Open questions and limitations'. "
+                        "Cite every factual claim with the provided numbers like [1][2]. Do not invent facts; "
+                        "state uncertainty; omit the Sources section."
+                    )
+                ),
+                HumanMessage(
+                    content=(
+                        f"Main topic: {state['topic']}\n\n"
+                        f"Reviewer notes: {state.get('review_notes', 'None')}\n\n"
+                        f"Verified findings and numbered sources:\n{evidence}"
+                    )
+                ),
+            ]
+        )
+        title = report.title
+        markdown = report.markdown
+
+        sources = bibliography or "No web sources were returned."
+        return {"report": f"# {title}\n\n{markdown}\n\n## Sources\n\n{sources}"}
+
+    return {
+        "lead_planner_node": lead_planner_node,
+        "researcher_node": researcher_node,
+        "reviewer_node": reviewer_node,
+        "writer_node": writer_node,
+    }
+
+
+@lru_cache(maxsize=1)
+def _default_node_implementations() -> NodeImplementations:
+    """Lazily create environment-configured functions for direct graph injection."""
+    return create_node_implementations()
+
+
+def lead_planner_node(state: ResearchState) -> dict[str, Any]:
+    return _default_node_implementations()["lead_planner_node"](state)
+
+
+def researcher_node(state: ResearcherWorkerState) -> dict[str, Any]:
+    return _default_node_implementations()["researcher_node"](state)
+
+
+def reviewer_node(state: ResearchState) -> dict[str, Any]:
+    return _default_node_implementations()["reviewer_node"](state)
+
+
+def writer_node(state: ResearchState) -> dict[str, Any]:
+    return _default_node_implementations()["writer_node"](state)
