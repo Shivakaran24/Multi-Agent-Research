@@ -1,0 +1,18 @@
+{
+  "dataset": "D:\\Multi Agent Research Assistant\\Backend\\evals\\dataset.jsonl",
+  "cases_total": 1,
+  "cases_succeeded": 0,
+  "mean_scores": {
+    "overall_score": null,
+    "coverage_score": null,
+    "grounding_score": null,
+    "citation_score": null,
+    "clarity_score": null
+  },
+  "results": [
+    {
+      "id": "cold-climate-heat-pumps",
+      "error": "RateLimitError"
+    }
+  ]
+}
