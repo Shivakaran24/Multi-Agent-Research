@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { fetchAuthConfig, forgotPassword, resetPassword, useAuth, type ServerAuthConfig } from './auth'
+import { API, fetchAuthConfig, forgotPassword, resetPassword, useAuth, type ServerAuthConfig } from './auth'
 
 type Mode = 'login' | 'register' | 'forgot' | 'reset'
 type Fields = { fullName: string; email: string; password: string; confirm: string }
@@ -137,6 +137,7 @@ export default function AuthPage() {
         {notice && mode === 'login' && !flash && !formError && <div className="auth-notice" role="status">{notice}</div>}
         {formError && <div className="error-box" role="alert"><span>!</span> {formError}</div>}
 
+        {config?.unreachable && <div className="error-box" role="alert"><span>!</span> Cannot read the server's settings from {API}/auth/config. If you are the site owner, check that VITE_API_URL points at the API service (no trailing path) and that the API is running. Free hosts can take about a minute to wake up.</div>}
         {isRegister && registrationClosed && <div className="auth-notice" role="status">Registration is closed on this server. Ask an administrator to create an account for you.</div>}
         {mode === 'forgot' && resetUnavailable && <div className="auth-notice" role="status">Password reset by email is not set up on this server. Contact an administrator.</div>}
         {mode === 'reset' && !resetToken && <div className="error-box" role="alert"><span>!</span> This reset link is incomplete. Open the link from your email again, or <a href="#/forgot">request a new one</a>.</div>}

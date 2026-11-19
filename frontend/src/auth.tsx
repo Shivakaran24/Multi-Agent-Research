@@ -5,7 +5,7 @@ export const API = (import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000').rep
 export type User = { id: string; email: string; full_name: string; created_at: string }
 type AuthResponse = { access_token: string; expires_in: number; user: User }
 export type Session = { token: string; user: User; expiresAt: number }
-export type ServerAuthConfig = { registration_open: boolean; password_reset_available: boolean }
+export type ServerAuthConfig = { registration_open: boolean; password_reset_available: boolean; unreachable?: boolean }
 
 type AuthContextValue = {
   session: Session | null
@@ -86,7 +86,8 @@ export async function fetchAuthConfig(): Promise<ServerAuthConfig> {
     const response = await fetch(`${API}/auth/config`)
     if (response.ok) return (await response.json()) as ServerAuthConfig
   } catch { /* fall through */ }
-  return { registration_open: true, password_reset_available: false }
+  // Could not read the server's settings: usually a wrong API address (VITE_API_URL) or a sleeping host.
+  return { registration_open: true, password_reset_available: false, unreachable: true }
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
