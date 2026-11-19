@@ -1,1 +1,1 @@
-{"root":["./src/account.tsx","./src/app.tsx","./src/authpage.tsx","./src/visualcontext.tsx","./src/auth.tsx","./src/main.tsx","./src/report.ts","./src/runs.ts","./src/vite-env.d.ts"],"version":"5.7.3"}
+{"root":["./src/Account.tsx","./src/App.tsx","./src/AuthPage.tsx","./src/FollowUp.tsx","./src/Logo.tsx","./src/SampleReport.tsx","./src/VisualContext.tsx","./src/auth.tsx","./src/main.tsx","./src/report.ts","./src/runs.ts","./src/sample.ts","./src/vite-env.d.ts"],"version":"5.7.3"}

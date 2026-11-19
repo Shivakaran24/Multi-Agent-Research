@@ -39,6 +39,7 @@ Accounts support password change and email reset (set `SMTP_*`; without SMTP, pr
 - Research history: every run is saved per user; reopen, delete, or resume after a refresh. Interrupted runs are flagged and can be re-run.
 - Cancel a running job, and pick research depth (1-3 review passes) per run.
 - Export a brief as Markdown, a standalone HTML page (opens in Word), or print/save as PDF. Citations render as a Sources list.
+- Follow-up questions on a finished brief, answered only from that brief; the writer sees source excerpts and invalid citation numbers are stripped.
 
 ## Testing
 

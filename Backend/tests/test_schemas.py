@@ -30,3 +30,18 @@ def test_too_short_question_still_rejected():
     import pytest
     with pytest.raises(Exception):
         ResearchQuestion.model_validate({"question": "hi", "rationale": ""})
+
+
+def test_citation_sanitizer_and_excerpts():
+    from research_assistant.nodes import _citation_context, sanitize_citations
+    from research_assistant.schemas import ResearchFinding, Source
+
+    assert sanitize_citations("A [1] B [3][2] C [9].", 3) == "A [1] B [3][2] C ."
+    assert sanitize_citations("List [0] and [link](http://x)", 3) == "List  and [link](http://x)"
+    finding = ResearchFinding(
+        query="q", summary="s",
+        sources=[Source(title="T", url="https://example.com/a", snippet="snip", content="x" * 900)],
+    )
+    context, bibliography = _citation_context([finding])
+    assert '"excerpt":"' + "x" * 350 + '"' in context and "x" * 351 not in context
+    assert bibliography.startswith("[1] T")

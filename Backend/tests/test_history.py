@@ -214,3 +214,58 @@ def test_legacy_token_has_no_history_but_can_read_by_id(env):
     legacy = {"Authorization": "Bearer " + "L" * 40}
     assert client.get("/research/runs", headers=legacy).json()["runs"] == []
     assert client.get(f"/research/runs/{thread_id}", headers=legacy).status_code == 200
+
+
+# ------------------------------------------------------------------ follow-up questions
+
+
+def completed_run(client, token):
+    thread_id, _ = start_run(client, token, topic="Grid storage")
+    client.post(f"/research/runs/{thread_id}/resume", json={}, headers=auth(token))
+    return thread_id
+
+
+def test_follow_up_answers_from_the_saved_report(env):
+    client, _ = env
+    token = token_for(client)
+    thread_id = completed_run(client, token)
+    seen = {}
+
+    def fake(report, question, settings):
+        seen.update(report=report, question=question)
+        return "Answer from the brief [1]."
+
+    client.app.state.followup_fn = fake
+    response = client.post(f"/research/runs/{thread_id}/ask", json={"question": "  Why?  "}, headers=auth(token))
+    assert response.status_code == 200
+    assert response.json() == {"question": "Why?", "answer": "Answer from the brief [1]."}
+    assert seen["report"].startswith("# Brief") and seen["question"] == "Why?"
+
+
+def test_follow_up_requires_a_finished_report_and_ownership(env):
+    client, _ = env
+    token = token_for(client)
+    thread_id, _ = start_run(client, token, topic="Grid storage")  # still awaiting plan review
+    client.app.state.followup_fn = lambda *a: "x"
+    assert client.post(f"/research/runs/{thread_id}/ask", json={"question": "Why?"}, headers=auth(token)).status_code == 409
+    done = completed_run(client, token)
+    other = token_for(client, email="grace@example.com", name="Grace Hopper")
+    assert client.post(f"/research/runs/{done}/ask", json={"question": "Why?"}, headers=auth(other)).status_code == 404
+    assert client.post(f"/research/runs/{done}/ask", json={"question": "?"}, headers=auth(token)).status_code == 422
+
+
+def test_follow_up_failures_and_rate_limit(env, monkeypatch):
+    client, _ = env
+    token = token_for(client)
+    thread_id = completed_run(client, token)
+
+    def boom(*args):
+        raise RuntimeError("provider down")
+
+    client.app.state.followup_fn = boom
+    assert client.post(f"/research/runs/{thread_id}/ask", json={"question": "Why?"}, headers=auth(token)).status_code == 502
+    client.app.state.followup_fn = lambda *a: "ok"
+    monkeypatch.setattr("research_assistant.api.FOLLOWUPS_PER_HOUR", 2)
+    client.app.state.followup_times.clear()
+    codes = [client.post(f"/research/runs/{thread_id}/ask", json={"question": "Why?"}, headers=auth(token)).status_code for _ in range(3)]
+    assert codes == [200, 200, 429]

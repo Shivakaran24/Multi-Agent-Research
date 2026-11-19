@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from functools import lru_cache
 from typing import Any, TypedDict
@@ -34,6 +35,20 @@ class NodeImplementations(TypedDict):
     writer_node: NodeFn
 
 
+EXCERPT_FOR_WRITER = 350
+_CITATION = re.compile(r"\[(\d{1,3})\]")
+
+
+def sanitize_citations(markdown: str, source_count: int) -> str:
+    """Drop citation markers that do not point at a real numbered source."""
+
+    def keep(match: re.Match[str]) -> str:
+        number = int(match.group(1))
+        return match.group(0) if 1 <= number <= source_count else ""
+
+    return _CITATION.sub(keep, markdown)
+
+
 def _citation_context(findings: list[ResearchFinding]) -> tuple[str, str]:
     """Build evidence with stable citation numbers and a deterministic bibliography."""
     unique_sources: dict[str, Source] = {}
@@ -52,7 +67,12 @@ def _citation_context(findings: list[ResearchFinding]) -> tuple[str, str]:
         )
 
     source_rows = [
-        {"citation": index, "title": source.title, "url": url}
+        {
+            "citation": index,
+            "title": source.title,
+            "url": url,
+            "excerpt": (source.content or source.snippet or "")[:EXCERPT_FOR_WRITER],
+        }
         for index, (url, source) in enumerate(unique_sources.items(), start=1)
     ]
     context = json.dumps(
@@ -249,7 +269,8 @@ def create_node_implementations(
                         "answering the topic using only the supplied evidence. Use this structure: a short "
                         "'Key takeaways' bullet list, then one '##' section per major theme with specific facts, "
                         "figures, examples and comparisons, then '## Open questions and limitations'. "
-                        "Cite every factual claim with the provided numbers like [1][2]. Do not invent facts; "
+                        "Cite every factual claim with the provided numbers like [1][2], and only cite a source whose "
+                        "excerpt or the finding summary actually supports the claim. Do not invent facts; "
                         "state uncertainty; omit the Sources section."
                     )
                 ),
@@ -263,7 +284,8 @@ def create_node_implementations(
             ]
         )
         title = report.title
-        markdown = report.markdown
+        source_count = len(bibliography.splitlines()) if bibliography else 0
+        markdown = sanitize_citations(report.markdown, source_count)
 
         sources = bibliography or "No web sources were returned."
         return {"report": f"# {title}\n\n{markdown}\n\n## Sources\n\n{sources}"}

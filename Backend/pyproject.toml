@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0.0"]
+dev = ["pytest>=8.0.0", "ruff>=0.6.0"]
 postgres = ["langgraph-checkpoint-postgres>=2.0.0", "psycopg[binary,pool]>=3.2.0"]
 
 [project.scripts]
@@ -35,3 +35,7 @@ include = ["research_assistant*"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = ["E501"]

@@ -37,3 +37,8 @@ export async function getRun(token: string, id: string): Promise<RunDetail> {
 export async function deleteRun(token: string, id: string): Promise<void> {
   await call(`/research/runs/${encodeURIComponent(id)}`, token, { method: 'DELETE' })
 }
+
+export async function askFollowUp(token: string, id: string, question: string): Promise<string> {
+  const response = await call(`/research/runs/${encodeURIComponent(id)}/ask`, token, { method: 'POST', body: JSON.stringify({ question }) })
+  return ((await response.json()) as { answer: string }).answer
+}

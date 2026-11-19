@@ -63,3 +63,5 @@
 .sample-topic{font:500 21px/1.3 'Playfair Display',serif;margin:12px 28px 6px 0;color:#20231f}
 .sample-note{margin:0 0 6px;font-size:11px;color:#8a8e85}
 .sample-modal .markdown{padding:4px 0 0}.sample-modal .sources{padding:14px 0 0}
+
+.followup{border-top:1px solid #eef0eb;padding:17px 20px 18px}.followup-head strong{display:block;font-size:11px}.followup-head small{display:block;color:#92968f;font-size:9px;margin-top:4px}.followup-turn{margin-top:14px}.followup-q{margin:0 0 6px;font-size:11px;font-weight:600;color:#333a32}.followup-a{padding:12px 14px;background:#f7f8f4;border-radius:7px;font-size:11px}.followup-suggestions{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}.followup-suggestions button{border:1px solid #dfe6dd;background:#fff;border-radius:14px;padding:6px 10px;color:#397653;font-size:9px}.followup-suggestions button:hover:not(:disabled){background:#f4f8f2}.followup-form{display:flex;gap:8px;margin-top:12px}.followup-form input{flex:1;min-width:0;height:36px;border:1px solid #e2e5dd;border-radius:6px;padding:0 10px;font-size:11px;outline-color:#8cac91}@media print{.followup{display:none}}

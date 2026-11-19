@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import VisualContext from './VisualContext'
+import FollowUp from './FollowUp'
 import Logo from './Logo'
 import AuthPage from './AuthPage'
 import Account from './Account'
@@ -18,6 +19,7 @@ const steps = [
 const DEPTHS = [{ value: 1, label: 'Quick · 1 review' }, { value: 2, label: 'Standard · 2 reviews' }, { value: 3, label: 'Thorough · 3 reviews' }]
 const TAGS: Partial<Record<RunStatus, string>> = { review: 'PLAN', failed: 'FAILED', interrupted: 'STOPPED', planning: 'LIVE', researching: 'LIVE' }
 const LAST_RUN_KEY = 'fieldwork.lastRun'
+const HELP_URL = 'https://github.com/Shivakaran24/Multi-Agent-Research#readme'
 
 const readLastRun = () => { try { return sessionStorage.getItem(LAST_RUN_KEY) || '' } catch { return '' } }
 const writeLastRun = (id: string) => { try { if (id) sessionStorage.setItem(LAST_RUN_KEY, id); else sessionStorage.removeItem(LAST_RUN_KEY) } catch { /* storage may be blocked */ } }
@@ -186,12 +188,20 @@ function Workspace({ session }: { session: Session }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); reset() }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  })
+
   const remaining = usage?.daily_limit ? Math.max(usage.daily_limit - usage.used_today, 0) : null
 
   return <div className="shell">
     <aside className="sidebar">
       <div className="brand"><Logo size={26} /><span>fieldwork<span className="brand-dot">.</span></span><span className="workspace-tag">WORKSPACE</span></div>
-      <button className="new-research" onClick={reset}><span>＋</span> New research <kbd>⌘ K</kbd></button>
+      <button className="new-research" onClick={reset}><span>＋</span> New research <kbd>{/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘ K' : 'Ctrl K'}</kbd></button>
       <div className="side-label">YOUR WORKSPACE</div>
       <button className="nav-item selected"><span>▦</span> Research desk</button>
       <div className="side-label recent-label">RECENT RESEARCH <span>{runs.length || ''}</span></div>
@@ -211,7 +221,7 @@ function Workspace({ session }: { session: Session }) {
     </aside>
 
     <main className="main">
-      <header className="topbar"><div className="breadcrumb">Workspace <span>/</span> Research desk</div><div className="top-actions"><div className="secure-label"><i /> Secure connection</div><button className="icon-button" aria-label="Settings" onClick={() => setShowSettings(true)}>⚙</button><button className="help-button">Help <span>↗</span></button></div></header>
+      <header className="topbar"><div className="breadcrumb">Workspace <span>/</span> Research desk</div><div className="top-actions"><div className="secure-label"><i /> Secure connection</div><button className="icon-button" aria-label="Settings" onClick={() => setShowSettings(true)}>⚙</button><button className="help-button" onClick={() => window.open(HELP_URL, '_blank', 'noopener,noreferrer')}>Help <span>↗</span></button></div></header>
       <div className="content-wrap">
         <div className="eyebrow"><span className="eyebrow-line" /> RESEARCH, WITH RIGOR</div>
         <h1>{phase === 'complete' ? 'Your brief is ready.' : phase === 'review' ? 'Review your research plan.' : phase === 'interrupted' ? 'Pick up where you left off.' : busy ? 'The work is underway.' : 'Make sense of the complex.'}</h1>
@@ -232,7 +242,7 @@ function Workspace({ session }: { session: Session }) {
 
         {busy && <section className="progress-card"><div className="progress-title"><span className="pulse" /><div><strong>Research in progress</strong><small>{thread ? `Run ${thread.slice(0, 8)} · ` : ''}{iterations ? `Review round ${iterations}` : 'Your team is working through the evidence'}</small></div><span className="live-tag">LIVE</span><button className="cancel-button" onClick={cancel}>Cancel</button></div><div className="steps">{steps.map((step, i) => { const active = activeStep === step.id; const done = steps.findIndex(s => s.id === activeStep) > i || (phase === 'writing' && i < 3); return <div className={`step ${active ? 'active' : ''} ${done ? 'done' : ''}`} key={step.id}><span className="step-icon">{done ? '✓' : active && busy ? <span className="spinner" /> : step.icon}</span><span className="step-copy"><strong>{step.label}</strong><small>{step.detail}</small></span><span className="step-state">{done ? 'COMPLETE' : active ? 'IN PROGRESS' : 'UP NEXT'}</span></div> })}</div>{events.length > 0 && <div className="activity-line"><span className="activity-pip" />{events[0]}</div>}</section>}
 
-        {phase === 'complete' && <section className="report-card"><div className="report-toolbar"><div className="report-label"><span className="report-check">✓</span><div><strong>Research brief</strong><small>Completed · {iterations || 1} evidence review{(iterations || 1) === 1 ? '' : 's'}</small></div></div><div className="report-actions"><ExportMenu markdown={report} view={view} topic={topic} /><button className="copy-button" onClick={() => navigator.clipboard.writeText(report).catch(() => setError('Clipboard access is unavailable.'))}>Copy brief <span>▣</span></button></div></div><article className="markdown" dangerouslySetInnerHTML={{ __html: view.html }} />{view.sources.length > 0 && <section className="sources" aria-label="Sources"><h3>Sources</h3><ol>{view.sources.map(source => <li key={source.n} value={source.n}><a href={source.url} target="_blank" rel="noopener noreferrer">{source.title}</a><small>{hostOf(source.url)}</small></li>)}</ol></section>}<VisualContext api={API} token={token} thread={thread} /></section>}
+        {phase === 'complete' && <section className="report-card"><div className="report-toolbar"><div className="report-label"><span className="report-check">✓</span><div><strong>Research brief</strong><small>Completed · {iterations || 1} evidence review{(iterations || 1) === 1 ? '' : 's'}</small></div></div><div className="report-actions"><ExportMenu markdown={report} view={view} topic={topic} /><button className="copy-button" onClick={() => navigator.clipboard.writeText(report).catch(() => setError('Clipboard access is unavailable.'))}>Copy brief <span>▣</span></button></div></div><article className="markdown" dangerouslySetInnerHTML={{ __html: view.html }} />{view.sources.length > 0 && <section className="sources" aria-label="Sources"><h3>Sources</h3><ol>{view.sources.map(source => <li key={source.n} value={source.n}><a href={source.url} target="_blank" rel="noopener noreferrer">{source.title}</a><small>{hostOf(source.url)}</small></li>)}</ol></section>}<FollowUp token={token} thread={thread} /><VisualContext api={API} token={token} thread={thread} /></section>}
 
         <div className="trust-row"><span>BUILT FOR THOUGHTFUL WORK</span><i /><span>Human-reviewed plan</span><i /><span>Evidence checked</span><i /><span>Every claim traceable</span></div>
         {phase === 'idle' && <div className="example-prompts"><div className="example-heading">A few places to start <span>↘</span></div><div className="prompt-grid">{['How is AI changing clinical drug discovery?', 'What is driving the next wave of grid storage?', 'How are cities adapting to extreme heat?'].map((prompt, i) => <button key={prompt} onClick={() => setTopic(prompt)}><span className="prompt-index">0{i + 1}</span><span>{prompt}</span><span className="prompt-arrow">↗</span></button>)}</div></div>}

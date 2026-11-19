@@ -43,11 +43,13 @@ python -m uvicorn research_assistant.api:app --host 127.0.0.1 --port 8000 --relo
 
 Run it from `Backend/` so Python can resolve the package. This invokes Uvicorn through the active Python environment and targets the exported `app` object. For a non-reloading server, remove `--reload`.
 
-The API reads `GROQ_API_KEY`, `GROQ_MODEL`, `TAVILY_API_KEY`, and `RESEARCH_API_TOKEN` from the environment or `.env`. Create a strong random `RESEARCH_API_TOKEN` (at least 32 random bytes), keep it server-side, and give authorized users the token through a secure channel. Research endpoints require `Authorization: Bearer <token>`; `/healthz` is public and does not expose provider configuration. `CORS_ORIGINS` is a JSON array of exact trusted browser origins. Do not use wildcard origins in production. Start a run with an HTTP client that can read a streaming POST response:
+The API reads `GROQ_API_KEY`, `GROQ_MODEL`, `TAVILY_API_KEY`, `DATABASE_URL` and `AUTH_SECRET_KEY` from the environment or `.env` (see `.env.example`). Users sign up with `POST /auth/register` (closed by default in production; use `research-assistant-create-user`) and sign in with `POST /auth/login`, which returns a short-lived JWT. Research endpoints require `Authorization: Bearer <jwt>`. A static `RESEARCH_API_TOKEN` (at least 32 random bytes) is still accepted as a service credential for scripts. `/healthz` and `/readyz` are public and do not expose provider configuration. `CORS_ORIGINS` is a JSON array of exact trusted browser origins and `ALLOWED_HOSTS` lists accepted Host headers; do not use wildcards in production. Per-user limits (`MAX_RUNS_PER_USER_PER_DAY`, concurrent runs) bound cost. 
+
+Other endpoints: `GET /research/runs` and `GET /research/runs/{thread_id}` for history, plus account endpoints under `/auth` (change password, forgot/reset password, delete account). Start a run with an HTTP client that can read a streaming POST response:
 
 ```http
 POST /research/runs
-Authorization: Bearer <token>
+Authorization: Bearer <jwt>
 Content-Type: application/json
 
 {"topic":"Current state of solid-state battery commercialization in EVs"}
@@ -57,7 +59,7 @@ The SSE stream sends `started` with the generated `thread_id`, `progress` events
 
 ```http
 POST /research/runs/{thread_id}/resume
-Authorization: Bearer <token>
+Authorization: Bearer <jwt>
 Content-Type: application/json
 
 {"questions":[{"question":"What EV solid-state battery pilot lines are operating?","rationale":"Identify commercial readiness."}]}
@@ -67,7 +69,7 @@ Send `{}` to approve the proposed plan unchanged. Resume streams further `progre
 
 ### Visual research context
 
-After a report is complete, the frontend can request related images, video explainers, and Sketchfab 3D models from `POST /research/runs/{thread_id}/visuals` with `{"types":["images","videos","models"]}` and the same bearer token. The search runs only when requested and uses Tavily for all three types. Images use Tavily image search; video and model links are restricted to YouTube and Sketchfab. YouTube and Sketchfab previews load only after the user chooses Preview. These visuals are for orientation, not evidence: use the report citations for factual claims and check the publisher's reuse terms before redistributing media.
+After a report is complete, the frontend can request related images, video explainers, and Sketchfab 3D models from `POST /research/runs/{thread_id}/visuals` with `{"types":["images","videos","models"]}` and the same bearer credential. The search runs only when requested and uses Tavily for all three types. Images use Tavily image search; video and model links are restricted to YouTube and Sketchfab. YouTube and Sketchfab previews load only after the user chooses Preview. These visuals are for orientation, not evidence: use the report citations for factual claims and check the publisher's reuse terms before redistributing media.
 
 ### Windows Application Control
 
@@ -151,3 +153,11 @@ graph = build_research_graph(
 ```
 
 These named functions lazily create the environment-configured Groq and Tavily clients. For custom providers or isolated runs, call `create_node_implementations(settings=..., llm=..., fast_llm=..., search=...)` and inject the returned functions. Custom nodes use the same state keys as the built-in nodes: `plan`, `findings`, `gaps`, `sufficient`, `review_notes`, `iteration`, and `report`. Each researcher receives only `{"query": ...}`.
+
+## Follow-up questions
+
+`POST /research/runs/{thread_id}/ask` with `{"question":"..."}` answers a question about a finished brief using only that brief and its numbered sources, and returns `{"question","answer"}`. It returns 409 until the report is complete, 404 for runs the caller does not own, and 429 after 20 questions per hour per user.
+
+## Citation grounding
+
+The writer receives a short excerpt of each numbered source, not only the researchers' summaries, and is told to cite only sources that support a claim. Any `[n]` marker that does not match a real source is removed from the final report.

@@ -36,6 +36,7 @@ from research_assistant.auth import (
     verify_access_token,
 )
 from research_assistant.config import Settings
+from research_assistant.followup import answer_followup
 from research_assistant.graph import build_research_graph
 from research_assistant.schemas import ResearchQuestion, RunDetail, RunList
 
@@ -59,6 +60,21 @@ class ResumeResearchRequest(BaseModel):
     """Omit questions to approve the plan as shown, or provide edited questions."""
 
     questions: list[ResearchQuestion] | None = Field(default=None, min_length=1, max_length=8)
+
+
+class FollowUpRequest(BaseModel):
+    question: str = Field(min_length=3, max_length=500)
+
+    @field_validator("question")
+    @classmethod
+    def strip_question(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < 3:
+            raise ValueError("Ask a question of at least 3 characters.")
+        return value
+
+
+FOLLOWUPS_PER_HOUR = 20
 
 
 class VisualResearchRequest(BaseModel):
@@ -745,6 +761,39 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
             user_id=getattr(request.state, "user_id", None), status_on_start="researching",
         )
 
+    @app.post("/research/runs/{thread_id}/ask")
+    async def ask_followup(thread_id: str, body: FollowUpRequest, request: Request) -> dict[str, Any]:
+        try:
+            uuid.UUID(thread_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="Research thread was not found.") from exc
+        user_id = getattr(request.state, "user_id", None)
+        row = await asyncio.to_thread(get_store().get_run, thread_id, user_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Research thread was not found.")
+        report = public_run(row).get("report")
+        if not report:
+            raise HTTPException(status_code=409, detail="Follow-up questions are available after the report is complete.")
+        now = datetime.now(timezone.utc).timestamp()
+        key = str(user_id or "service")
+        recent = [t for t in app.state.followup_times.get(key, []) if now - t < 3600]
+        if len(recent) >= FOLLOWUPS_PER_HOUR:
+            raise HTTPException(status_code=429, detail="Follow-up limit reached. Try again in a little while.")
+        recent.append(now)
+        app.state.followup_times[key] = recent
+        try:
+            answer = await asyncio.to_thread(
+                app.state.followup_fn, report, body.question, live_settings()
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=503, detail="Follow-up questions are not configured on the server.") from exc
+        except Exception as exc:
+            logger.warning("Follow-up failed on thread %s: %s", thread_id, type(exc).__name__)
+            raise HTTPException(status_code=502, detail="The model could not answer right now. Try again.") from exc
+        if not answer:
+            raise HTTPException(status_code=502, detail="The model returned an empty answer. Try again.")
+        return {"question": body.question, "answer": answer}
+
     @app.post("/research/runs/{thread_id}/visuals")
     async def research_visuals(thread_id: str, body: VisualResearchRequest, request: Request) -> dict[str, Any]:
         try:
@@ -790,6 +839,8 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
                 response[name] = outcome
         return response
 
+    app.state.followup_fn = answer_followup
+    app.state.followup_times = {}
     return app
 
 
