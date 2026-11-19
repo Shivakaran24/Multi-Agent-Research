@@ -29,7 +29,7 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: Backend/pyproject.toml
-      - run: pip install -e ".[dev]"
+      - run: pip install -e ".[dev,postgres]"
       - run: python -m pytest tests -q
 
   frontend:
