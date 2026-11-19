@@ -1,57 +1,158 @@
-# Multi Agent Research Assistant
+# Fieldwork — Multi Agent Research Assistant
 
-Repository layout:
+Fieldwork turns a topic into a cited research brief. You type a question, an AI planner breaks it into focused sub-questions, several researcher agents search the web in parallel, a reviewer checks for gaps, and a writer produces a structured report with numbered sources. You stay in control: you can edit the plan before research starts, ask follow-up questions, export the result, share it, or schedule it to repeat.
 
-- `Backend/` contains the Python LangGraph workflow, CLI, package configuration, and backend setup documentation.
-- `frontend/` is the home for the user interface.
+- **Backend:** Python, FastAPI and LangGraph (`Backend/`)
+- **Frontend:** React, TypeScript and Vite (`frontend/`)
+- **Models and search:** Groq (`openai/gpt-oss-20b` by default) and Tavily
+- **Storage:** SQLite in development, PostgreSQL in production
 
-## Application
+## What it does
 
-- `Backend/` contains the FastAPI API and LangGraph planner, parallel researchers, reviewer, and report writer.
-- `frontend/` contains the Vite, React, and TypeScript research workspace.
+1. **Plan.** The lead planner proposes research questions for your topic. You can approve or edit them (human-in-the-loop).
+2. **Research.** One researcher per question runs in parallel: search, filter and rank sources, read excerpts, summarise findings.
+3. **Review.** A reviewer decides whether the findings have gaps and, if so, requests another pass (1–3 passes, your choice).
+4. **Write.** The writer produces the brief in your chosen style, audience, length and language. Citations are validated against the real sources, so invented numbers are stripped.
+5. **Check (optional).** A claim-check pass marks sentences the sources don't support as *(unverified)*.
 
-See [Backend/README.md](Backend/README.md) for provider credentials, the authenticated SSE API, and durable checkpoint deployment. See [frontend/README.md](frontend/README.md) for client setup and build instructions.
+### Features
 
-Run the research evaluation suite from `Backend/` with `research-assistant-eval` after configuring Groq and Tavily credentials.
+**Research quality**
+- Source filtering: duplicates, thin pages and blocked domains are dropped; authoritative hosts (.gov, .edu, .int and a preferred list) rank higher.
+- Per-run time window (day, week, month, year).
+- Claim check, which can be switched off per run to save tokens.
+- Your own sources: up to 5 links plus pasted notes are treated as sources alongside web results.
 
-Completed research reports can also fetch visual context on demand: related images, YouTube videos, and interactive Sketchfab 3D models. Visual search uses the configured Tavily key and does not require additional provider keys.
+**Control over output**
+- Styles: brief, executive, deep dive, comparison. Audience, length and output language are selectable.
+- Compare two topics in one report.
+- Depth: 1–3 review passes.
 
-For local development, configure the backend `.env` with Groq and Tavily keys, an optional `AUTH_SECRET_KEY` (sessions then survive restarts) and `CORS_ORIGINS=["http://127.0.0.1:5173","http://localhost:5173"]`. The frontend `.env` points Vite to `http://127.0.0.1:8000`. Start FastAPI from `Backend/`, then run `npm install` and `npm run dev` from `frontend/`.
+**Workflow**
+- Live progress lines show what each researcher found.
+- History per user, with search and tags. Interrupted runs can be re-run; running jobs can be cancelled.
+- Follow-up questions answered only from the finished brief.
+- Recurring research (daily, weekly, monthly) with an emailed "what changed" note.
+- Email a brief to yourself.
+- Export to Markdown, HTML, Word (.docx, built in the browser) or print/PDF.
+- Private-by-default read-only share links, revocable at any time.
+- Thumbs up/down feedback on each brief.
+- Citation hover cards showing the source behind each number.
+- Related images, YouTube videos and Sketchfab 3D models on demand (uses the Tavily key).
 
-## Production deployment
+**Accounts and cost control**
+- Email and password accounts (scrypt hashes, signed expiring sessions), password reset by email, optional email verification.
+- Optional invite codes for registration, and an admin usage page for emails listed in `ADMIN_EMAILS`.
+- Per-user daily run limit, concurrent-run limit and daily token budget, with a live "tries and tokens left" counter.
+- Optional demo account for public showcases.
+- Dark mode (follows the system setting; toggle in the top bar).
 
-The repository includes a Docker Compose deployment with PostgreSQL checkpoint persistence, a non-root API container, an unprivileged static frontend, and Caddy for HTTPS termination. Users sign in with their own accounts (scrypt-hashed passwords, signed expiring sessions); runs are private to their owner.
+## Architecture
 
-1. Point a DNS name at the server and allow inbound TCP ports 80 and 443.
-2. Copy `.env.production.example` to `.env.production`. Set `SITE_ADDRESS`, and make `CORS_ORIGINS` and `ALLOWED_HOSTS` match that exact hostname.
-3. Generate random secrets locally (for example, `python -c "import secrets; print(secrets.token_hex(32))"`) for `POSTGRES_PASSWORD` and `AUTH_SECRET_KEY` (and `RESEARCH_API_TOKEN` if using legacy clients). Add fresh Groq and Tavily API keys. Registration is disabled by default in production; set `ALLOW_REGISTRATION=true` only during controlled onboarding. Keep `.env.production` and database backups out of source control.
-4. Start the stack with `docker compose --env-file .env.production -f compose.production.yaml up -d --build`.
-5. Create the first account with `research-assistant-create-user` (run inside the API container), since registration is closed by default. `RESEARCH_API_TOKEN` is only a legacy credential for scripts; it is not needed for the web app.
+```
+Browser (React + Vite)
+   │  HTTPS, JSON + Server-Sent Events (progress stream)
+   ▼
+FastAPI  ── auth, rate limits, token budgets, request logging
+   │         scheduler (background task for recurring research)
+   ▼
+LangGraph workflow
+   START → lead planner → human plan review (interrupt)
+         → researchers (parallel fan-out via Send)
+         → reviewer ──(gaps? loop back)──┐
+         → writer (+ citation sanitising, claim check) → END
+   │                 │
+   ▼                 ▼
+Groq LLM         Tavily search / extract
+   │
+   ▼
+SQLite (dev) / PostgreSQL (prod): users, runs, schedules, tokens, checkpoints
+```
 
-Caddy obtains and renews TLS certificates when DNS and firewall routing are correct. PostgreSQL data is stored in the `postgres_data` volume; configure encrypted off-host backups and test restores before relying on the service. The API container runs one worker because its concurrency limit and current run orchestration are process-local. Scale-out needs shared rate limiting and concurrency controls, migration coordination, and load testing. Pin container images by digest and scan/update them as part of release operations.
+How the pieces fit:
 
-The default research budget is moderate: four research questions, one review pass, four search results per question (1200-character excerpts), and model outputs of up to 3500 tokens for the report and 1024 per researcher summary, producing a brief of roughly 5-8 thousand characters. Free-tier Groq limits can throttle this; lower `INITIAL_QUESTIONS`, `SEARCH_RESULTS_PER_QUERY` and the token settings if you see rate-limit errors. One run and one graph task execute at a time, and transient Groq 429s retry with backoff. Increase `INITIAL_QUESTIONS`, `MAX_ITERATIONS`, `SEARCH_RESULTS_PER_QUERY`, or the `GROQ_*_MAX_TOKENS` settings when a topic needs more depth and your provider tier supports the added usage.
+- `Backend/research_assistant/graph.py` wires the graph; `nodes.py` holds the planner, researcher, reviewer and writer; `state.py` and `schemas.py` define the shared state and API models.
+- The plan-review step uses LangGraph's `interrupt` and resumes with `Command(resume=...)`, so a run can wait for you across refreshes. Checkpoints are durable in PostgreSQL.
+- `api.py` exposes the REST and SSE endpoints and runs limits, usage tracking and the scheduler. `auth.py` owns accounts, runs, schedules and the database schema (with idempotent migrations).
+- `sources.py` (filter and rank), `claims.py` (claim check), `usersources.py` (your links), `followup.py` (follow-up answers) and `usage.py` (token counting via a LangChain callback) are small single-purpose modules.
+- `frontend/src/` holds the UI. `App.tsx` is the workspace; `report.ts`, `citations.ts` and `docx.ts` render and export briefs; `runs.ts` is the API client.
 
-Accounts support password change and email reset (set `SMTP_*`; without SMTP, production hides password reset). Each user is capped by `MAX_RUNS_PER_USER_PER_DAY` and `MAX_ACTIVE_RUNS_PER_USER`. Not yet implemented: email verification, OIDC/SSO, audit logging, and multi-worker rate limiting (login throttling is in-memory, so keep one worker). In production, startup refuses missing provider secrets, a durable database, wildcard CORS, or non-HTTPS browser origins. The development in-memory checkpoint is for local use only.
+## Repository layout
 
-## Features
+```
+Backend/        FastAPI app, LangGraph workflow, CLI, tests, evals
+frontend/       Vite + React + TypeScript client and unit tests
+render.yaml     Render Blueprint (free-tier deployment)
+compose.production.yaml, Caddyfile   Docker Compose + HTTPS deployment
+DEPLOY.md       Free-tier public demo guide
+```
 
-- Research history: every run is saved per user; reopen, delete, or resume after a refresh. Interrupted runs are flagged and can be re-run.
-- Cancel a running job, and pick research depth (1-3 review passes) per run.
-- Export a brief as Markdown, a standalone HTML page (opens in Word), or print/save as PDF. Citations render as a Sources list.
-- Follow-up questions on a finished brief, answered only from that brief; the writer sees source excerpts and invalid citation numbers are stripped.
-- Thumbs up/down on each brief, and a private-by-default read-only share link that the owner can turn off at any time.
-- Word (.docx) export built in the browser, alongside Markdown, HTML and print/PDF.
-- Optional email verification (`REQUIRE_EMAIL_VERIFICATION=true`, needs SMTP in production): new accounts must confirm their address before starting research.
-- Daily token budget per user (`MAX_TOKENS_PER_USER_PER_DAY`) with a live "tokens left" counter, next to the daily run limit.
-- Source filtering: duplicates, thin pages and junk domains are dropped, and authoritative hosts (.gov, .edu, .int, plus a preferred list) rank higher. `SEARCH_TIME_RANGE` limits results to recent pages.
-- Recurring research: schedule a topic daily, weekly or monthly; each run is emailed with a short "what changed" note and tagged AUTO in history.
-- Live progress lines show what each researcher found while a run is going.
+## Setup (local development)
 
-## Testing
+You need Python 3.11+, Node 22.6+, a [Groq](https://console.groq.com) API key and a [Tavily](https://tavily.com) API key.
 
-`cd Backend && pip install -e ".[dev]" && pytest`. Set `TEST_DATABASE_URL` (libpq string) to also run the suite against PostgreSQL. CI (`.github/workflows/ci.yml`) runs backend tests with a Postgres service and the frontend build.
+**Backend**
+```bash
+cd Backend
+python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
+pip install -e ".[dev]"
+cp .env.example .env                                  # then add GROQ_API_KEY and TAVILY_API_KEY
+research-assistant-api                                 # serves on http://127.0.0.1:8000
+```
+Leave `AUTH_SECRET_KEY` empty in development (sessions then end on restart), or set it to keep sessions.
 
-## Public demo
+**Frontend**
+```bash
+cd frontend
+npm install
+echo VITE_API_URL=http://127.0.0.1:8000 > .env
+npm run dev                                           # http://localhost:5173
+```
+Create an account on the sign-in page and start researching. `CORS_ORIGINS` in the backend `.env` must include `http://localhost:5173` and `http://127.0.0.1:5173` (the example file does).
 
-See [DEPLOY.md](DEPLOY.md) for a free-tier Render deployment (`render.yaml`) with a single capped demo login.
+**Tests**
+```bash
+cd Backend && pytest              # set TEST_DATABASE_URL to also run against PostgreSQL
+cd frontend && npm test           # Node 22.6+
+```
+Evaluation suite (needs real keys): `research-assistant-eval` from `Backend/`.
+
+## Configuration
+
+All settings are environment variables; see `Backend/.env.example` for the full list. The important ones:
+
+| Setting | Purpose |
+|---|---|
+| `GROQ_API_KEY`, `TAVILY_API_KEY` | Model and search providers (required) |
+| `AUTH_SECRET_KEY` | Signs sessions (required in production) |
+| `DATABASE_URL` | PostgreSQL connection string (required in production) |
+| `CORS_ORIGINS`, `ALLOWED_HOSTS` | Exact frontend origin and API hostname (production refuses wildcards) |
+| `ALLOW_REGISTRATION`, `INVITE_CODES`, `ADMIN_EMAILS` | Who can sign up and who sees admin stats |
+| `MAX_RUNS_PER_USER_PER_DAY`, `MAX_TOKENS_PER_USER_PER_DAY`, `MAX_ACTIVE_RUNS_PER_USER` | Cost controls (0 disables a cap) |
+| `INITIAL_QUESTIONS`, `MAX_ITERATIONS`, `SEARCH_RESULTS_PER_QUERY`, `GROQ_*_MAX_TOKENS` | Research depth and size |
+| `SMTP_*`, `APP_BASE_URL` | Password reset, verification, emailed briefs and schedules |
+| `REQUIRE_EMAIL_VERIFICATION`, `CLAIM_CHECK`, `SCHEDULER_ENABLED` | Feature switches |
+
+The default budget is moderate (four questions, one review pass, four results per question). Free Groq tiers can rate-limit it; lower `INITIAL_QUESTIONS`, `SEARCH_RESULTS_PER_QUERY` or the token settings if you see 429 errors. Transient 429s are retried with backoff.
+
+## Deployment
+
+**Free public demo (Render):** follow [DEPLOY.md](DEPLOY.md). `render.yaml` creates the API, a PostgreSQL database and the static frontend. Set `CORS_ORIGINS` and `ALLOWED_HOSTS` to your real service URLs (hostname only for `ALLOWED_HOSTS`); a mismatch shows up as a 400 error on `/auth/config`. Free instances sleep after about 15 minutes idle, and recurring research only fires while the API is awake (ping `/healthz` with an uptime monitor to keep it alive).
+
+**Self-hosted (Docker Compose + HTTPS):**
+1. Point a DNS name at the server and open TCP ports 80 and 443.
+2. Copy `.env.production.example` to `.env.production`; set `SITE_ADDRESS` and make `CORS_ORIGINS` and `ALLOWED_HOSTS` match it.
+3. Generate secrets (`python -c "import secrets; print(secrets.token_hex(32))"`) for `POSTGRES_PASSWORD` and `AUTH_SECRET_KEY`, and add the Groq and Tavily keys. Keep this file out of source control.
+4. `docker compose --env-file .env.production -f compose.production.yaml up -d --build`
+5. Create the first account with `research-assistant-create-user` inside the API container (registration is closed by default).
+
+Caddy obtains and renews TLS certificates. The API runs a single worker because rate limiting and run orchestration are process-local; scaling out needs shared limits and load testing. Configure off-host database backups and test restores.
+
+## Limitations
+
+- Google/OIDC sign-in, audit logging and multi-worker rate limiting are not implemented.
+- PDF upload is not supported; use links or pasted notes.
+- The brief appears when the writer finishes, not word by word.
+- Claim checking is a model judgement, not a guarantee of accuracy; always read the cited sources for anything important.
+
+More detail: [Backend/README.md](Backend/README.md) (API, credentials, checkpoints) and [frontend/README.md](frontend/README.md).
