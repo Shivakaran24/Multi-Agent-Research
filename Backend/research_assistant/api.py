@@ -30,6 +30,7 @@ from research_assistant.auth import (
     bearer_token,
     create_auth_router,
     create_mailer,
+    ensure_demo_user,
     signing_secret,
     store_from_settings,
     verify_access_token,
@@ -377,6 +378,11 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
     async def lifespan(app: FastAPI):
         app.state.database_ready = active_settings.database_url is None
         app.state.run_semaphore = asyncio.Semaphore(active_settings.max_concurrent_runs)
+        try:
+            if await asyncio.to_thread(ensure_demo_user, get_store(), active_settings):
+                logger.info("Created demo account %s", active_settings.demo_email)
+        except Exception:  # a bad demo config must not stop the service
+            logger.exception("Could not create the demo account")
         if app.state.research_graph is None and active_settings.database_url is not None:
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # type: ignore[import-not-found]
 

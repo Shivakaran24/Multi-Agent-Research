@@ -43,3 +43,7 @@ Accounts support password change and email reset (set `SMTP_*`; without SMTP, pr
 ## Testing
 
 `cd Backend && pip install -e ".[dev]" && pytest`. Set `TEST_DATABASE_URL` (libpq string) to also run the suite against PostgreSQL. CI (`.github/workflows/ci.yml`) runs backend tests with a Postgres service and the frontend build.
+
+## Public demo
+
+See [DEPLOY.md](DEPLOY.md) for a free-tier Render deployment (`render.yaml`) with a single capped demo login.

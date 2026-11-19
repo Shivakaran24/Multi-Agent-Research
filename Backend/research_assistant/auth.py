@@ -713,6 +713,25 @@ def create_auth_router(
 # --------------------------------------------------------------------------- command line
 
 
+def ensure_demo_user(store: UserStore, settings: Settings) -> bool:
+    """Create the configured demo account if missing. Returns True when it was created.
+
+    Never changes an existing account, so rotating DEMO_PASSWORD later has no effect.
+    """
+    if not settings.demo_email or not settings.demo_password:
+        return False
+    request = RegisterRequest(
+        full_name=settings.demo_name, email=settings.demo_email, password=settings.demo_password.get_secret_value()
+    )
+    if store.get_by_email(request.email) is not None:
+        return False
+    try:
+        store.create_user(email=request.email, full_name=request.full_name, password_hash=hash_password(request.password))
+    except EmailTaken:  # created concurrently by another process
+        return False
+    return True
+
+
 def create_user_cli(argv: list[str] | None = None) -> int:
     """`research-assistant-create-user --email you@example.com --name "Your Name"`.
 

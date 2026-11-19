@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     # production sends nothing (the sign-in page then hides "Forgot password").
     reset_token_ttl_minutes: int = Field(default=30, ge=5, le=1_440)
     app_base_url: str | None = None  # defaults to the first CORS origin
+    # Optional showcase account created at startup (for hosts without a shell). Pair with
+    # ALLOW_REGISTRATION=false so one capped login is the only way in.
+    demo_email: str | None = None
+    demo_password: SecretStr | None = None
+    demo_name: str = "Demo Visitor"
     smtp_host: str | None = None
     smtp_port: int = Field(default=587, ge=1, le=65_535)
     smtp_username: str | None = None

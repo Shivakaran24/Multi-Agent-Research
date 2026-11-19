@@ -289,3 +289,19 @@ def test_postgres_databases_are_upgraded_in_place():
     assert store.get_by_email("old@example.com").token_version == 0
     run = store.list_runs("u1")[0]
     assert run["status"] == "planning" and run["updated_at"] == "2026-01-02T00:00:00+00:00"
+
+
+def test_demo_account_is_seeded_once_and_can_log_in(tmp_path):
+    options = dict(
+        allow_registration=False, demo_email="Demo@Example.com", demo_password="showcase123", demo_name="Recruiter Demo"
+    )
+    client, _ = make_client(tmp_path, **options)
+    with client:
+        reply = client.post("/auth/login", json={"email": "demo@example.com", "password": "showcase123"})
+        assert reply.status_code == 200 and reply.json()["user"]["full_name"] == "Recruiter Demo"
+        denied = client.post("/auth/register", json={"full_name": "X Y", "email": "x@y.com", "password": "abcdefg1"})
+        assert denied.status_code == 403
+    # A restart against the same database must not fail or duplicate the account.
+    again, _ = make_client(tmp_path, fresh_database=False, **options)
+    with again:
+        assert again.post("/auth/login", json={"email": "demo@example.com", "password": "showcase123"}).status_code == 200
