@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     groq_eval_model: str | None = None
     tavily_api_key: SecretStr | None = None
     # Optional legacy shared token (scripts/CI). Normal users sign in with an account instead.
+    require_email_verification: bool = False
     research_api_token: SecretStr | None = Field(default=None, min_length=32)
     # Signs user session tokens. Required in production; in development a random per-process
     # key is used if unset, which simply means sessions end when the server restarts.
@@ -109,6 +110,11 @@ class Settings(BaseSettings):
     @property
     def password_reset_available(self) -> bool:
         return bool(self.smtp_host) or self.app_env != "production"
+
+    @property
+    def email_verification_required(self) -> bool:
+        """New accounts must confirm their email before researching (needs working mail)."""
+        return self.require_email_verification and (bool(self.smtp_host) or self.app_env != "production")
 
     @property
     def reset_link_base(self) -> str:

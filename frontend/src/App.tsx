@@ -1,15 +1,29 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import VisualContext from './VisualContext'
 import FollowUp from './FollowUp'
+import ReportActions from './ReportActions'
+import SharedView from './SharedView'
+import VerifyEmail from './VerifyEmail'
+import VerifyBanner from './VerifyBanner'
+import { markdownToDocx, DOCX_MIME } from './docx'
 import Logo from './Logo'
 import AuthPage from './AuthPage'
 import Account from './Account'
 import { API, errorMessage, useAuth, type Session } from './auth'
 import { deleteRun, getRun, listRuns, QUESTION_MAX, SessionExpired, type Question, type RunStatus, type RunSummary, type Usage } from './runs'
-import { buildReportView, downloadText, fileSafe, hostOf, reportTitle, standaloneHtml, type ReportView } from './report'
+import { buildReportView, downloadBlob, downloadText, fileSafe, hostOf, reportTitle, standaloneHtml, type ReportView } from './report'
 
 type RunEvent = { thread_id?: string; node?: string; update?: Record<string, unknown>; questions?: Question[]; report?: string; code?: string; message?: string }
 type Phase = 'idle' | 'planning' | 'review' | 'research' | 'reviewing' | 'writing' | 'complete' | 'interrupted' | 'error'
+/** Turn a researcher update into "Researched “query” · 4 sources". */
+function researcherLabel(update?: Record<string, unknown>): string {
+  const findings = Array.isArray(update?.findings) ? (update.findings as { query?: string; sources?: unknown[] }[]) : []
+  const first = findings[0]
+  if (!first?.query) return 'A researcher returned evidence'
+  const n = first.sources?.length ?? 0
+  const query = first.query.length > 70 ? `${first.query.slice(0, 67)}…` : first.query
+  return `Researched “${query}” · ${n} source${n === 1 ? '' : 's'}`
+}
 const steps = [
   { id: 'lead_planner', label: 'Research plan', detail: 'Breaking your topic into focused questions', icon: '⌘' },
   { id: 'researcher', label: 'Parallel research', detail: 'Gathering sources and evidence', icon: '⌕' },
@@ -32,6 +46,7 @@ function ExportMenu({ markdown, view, topic }: { markdown: string; view: ReportV
     <summary className="copy-button">Export <span>▾</span></summary>
     <div className="export-list" role="menu">
       <button role="menuitem" onClick={e => { downloadText(`${base}.md`, markdown, 'text/markdown'); done(e) }}>Markdown <small>.md</small></button>
+      <button role="menuitem" onClick={e => { downloadBlob(`${base}.docx`, markdownToDocx(markdown), DOCX_MIME); done(e) }}>Word document <small>.docx</small></button>
       <button role="menuitem" onClick={e => { downloadText(`${base}.html`, standaloneHtml(title, view), 'text/html'); done(e) }}>Web page <small>.html · opens in Word</small></button>
       <button role="menuitem" onClick={e => { done(e); window.print() }}>Print or save as PDF</button>
     </div>
@@ -112,7 +127,8 @@ function Workspace({ session }: { session: Session }) {
       if (data.node === 'researcher') setPhase('research')
       if (data.node === 'reviewer') { setPhase('reviewing'); setIterations(n => n + 1) }
       if (data.node === 'writer') setPhase('writing')
-      if (labels[data.node]) setEvents(items => [labels[data.node!], ...items].slice(0, 8))
+      const label = data.node === 'researcher' ? researcherLabel(data.update) : labels[data.node]
+      if (label) setEvents(items => [label, ...items].slice(0, 8))
     }
   }
 
@@ -221,7 +237,7 @@ function Workspace({ session }: { session: Session }) {
     </aside>
 
     <main className="main">
-      <header className="topbar"><div className="breadcrumb">Workspace <span>/</span> Research desk</div><div className="top-actions"><div className="secure-label"><i /> Secure connection</div><button className="icon-button" aria-label="Settings" onClick={() => setShowSettings(true)}>⚙</button><button className="help-button" onClick={() => window.open(HELP_URL, '_blank', 'noopener,noreferrer')}>Help <span>↗</span></button></div></header>
+      {user.email_verified === false && <VerifyBanner token={token} email={user.email} />}<header className="topbar"><div className="breadcrumb">Workspace <span>/</span> Research desk</div><div className="top-actions"><div className="secure-label"><i /> Secure connection</div><button className="icon-button" aria-label="Settings" onClick={() => setShowSettings(true)}>⚙</button><button className="help-button" onClick={() => window.open(HELP_URL, '_blank', 'noopener,noreferrer')}>Help <span>↗</span></button></div></header>
       <div className="content-wrap">
         <div className="eyebrow"><span className="eyebrow-line" /> RESEARCH, WITH RIGOR</div>
         <h1>{phase === 'complete' ? 'Your brief is ready.' : phase === 'review' ? 'Review your research plan.' : phase === 'interrupted' ? 'Pick up where you left off.' : busy ? 'The work is underway.' : 'Make sense of the complex.'}</h1>
@@ -240,9 +256,9 @@ function Workspace({ session }: { session: Session }) {
 
         {phase === 'review' && <section className="plan-card"><div className="card-heading"><span className="card-icon">⌘</span><div><strong>Proposed research plan</strong><small>{questions.length} focused questions · Edit before the team starts</small></div><span className="review-pill">YOUR REVIEW</span></div>{questions.map((q, i) => <div className="question-row" key={i}><span className="question-num">0{i + 1}</span><div className="question-fields"><input aria-label={`Research question ${i + 1}`} maxLength={QUESTION_MAX} value={q.question} onChange={e => setQuestions(items => items.map((item, j) => j === i ? { ...item, question: e.target.value } : item))} /><textarea aria-label={`Rationale ${i + 1}`} maxLength={QUESTION_MAX} value={q.rationale} onChange={e => setQuestions(items => items.map((item, j) => j === i ? { ...item, rationale: e.target.value } : item))} /></div></div>)}{error && <div className="error-box plan-error"><span>!</span> {error}</div>}<div className="plan-footer"><button className="text-button" onClick={() => setQuestions(items => items.length < 8 ? [...items, { question: '', rationale: '' }] : items)}>＋ Add a question</button><button className="start-button" disabled={!questions.length || questions.some(q => q.question.trim().length < 8)} onClick={approvePlan}>Approve &amp; begin <span>↗</span></button></div></section>}
 
-        {busy && <section className="progress-card"><div className="progress-title"><span className="pulse" /><div><strong>Research in progress</strong><small>{thread ? `Run ${thread.slice(0, 8)} · ` : ''}{iterations ? `Review round ${iterations}` : 'Your team is working through the evidence'}</small></div><span className="live-tag">LIVE</span><button className="cancel-button" onClick={cancel}>Cancel</button></div><div className="steps">{steps.map((step, i) => { const active = activeStep === step.id; const done = steps.findIndex(s => s.id === activeStep) > i || (phase === 'writing' && i < 3); return <div className={`step ${active ? 'active' : ''} ${done ? 'done' : ''}`} key={step.id}><span className="step-icon">{done ? '✓' : active && busy ? <span className="spinner" /> : step.icon}</span><span className="step-copy"><strong>{step.label}</strong><small>{step.detail}</small></span><span className="step-state">{done ? 'COMPLETE' : active ? 'IN PROGRESS' : 'UP NEXT'}</span></div> })}</div>{events.length > 0 && <div className="activity-line"><span className="activity-pip" />{events[0]}</div>}</section>}
+        {busy && <section className="progress-card"><div className="progress-title"><span className="pulse" /><div><strong>Research in progress</strong><small>{thread ? `Run ${thread.slice(0, 8)} · ` : ''}{iterations ? `Review round ${iterations}` : 'Your team is working through the evidence'}</small></div><span className="live-tag">LIVE</span><button className="cancel-button" onClick={cancel}>Cancel</button></div><div className="steps">{steps.map((step, i) => { const active = activeStep === step.id; const done = steps.findIndex(s => s.id === activeStep) > i || (phase === 'writing' && i < 3); return <div className={`step ${active ? 'active' : ''} ${done ? 'done' : ''}`} key={step.id}><span className="step-icon">{done ? '✓' : active && busy ? <span className="spinner" /> : step.icon}</span><span className="step-copy"><strong>{step.label}</strong><small>{step.detail}</small></span><span className="step-state">{done ? 'COMPLETE' : active ? 'IN PROGRESS' : 'UP NEXT'}</span></div> })}</div>{events.length > 0 && <div className="activity-feed" aria-live="polite">{events.slice(0, 4).map((e, i) => <div className={`activity-line ${i ? 'older' : ''}`} key={`${events.length - i}-${e}`}><span className="activity-pip" />{e}</div>)}</div>}</section>}
 
-        {phase === 'complete' && <section className="report-card"><div className="report-toolbar"><div className="report-label"><span className="report-check">✓</span><div><strong>Research brief</strong><small>Completed · {iterations || 1} evidence review{(iterations || 1) === 1 ? '' : 's'}</small></div></div><div className="report-actions"><ExportMenu markdown={report} view={view} topic={topic} /><button className="copy-button" onClick={() => navigator.clipboard.writeText(report).catch(() => setError('Clipboard access is unavailable.'))}>Copy brief <span>▣</span></button></div></div><article className="markdown" dangerouslySetInnerHTML={{ __html: view.html }} />{view.sources.length > 0 && <section className="sources" aria-label="Sources"><h3>Sources</h3><ol>{view.sources.map(source => <li key={source.n} value={source.n}><a href={source.url} target="_blank" rel="noopener noreferrer">{source.title}</a><small>{hostOf(source.url)}</small></li>)}</ol></section>}<FollowUp token={token} thread={thread} /><VisualContext api={API} token={token} thread={thread} /></section>}
+        {phase === 'complete' && <section className="report-card"><div className="report-toolbar"><div className="report-label"><span className="report-check">✓</span><div><strong>Research brief</strong><small>Completed · {iterations || 1} evidence review{(iterations || 1) === 1 ? '' : 's'}</small></div></div><div className="report-actions"><ExportMenu markdown={report} view={view} topic={topic} /><button className="copy-button" onClick={() => navigator.clipboard.writeText(report).catch(() => setError('Clipboard access is unavailable.'))}>Copy brief <span>▣</span></button></div></div><article className="markdown" dangerouslySetInnerHTML={{ __html: view.html }} />{view.sources.length > 0 && <section className="sources" aria-label="Sources"><h3>Sources</h3><ol>{view.sources.map(source => <li key={source.n} value={source.n}><a href={source.url} target="_blank" rel="noopener noreferrer">{source.title}</a><small>{hostOf(source.url)}</small></li>)}</ol></section>}<ReportActions token={token} thread={thread} /><FollowUp token={token} thread={thread} /><VisualContext api={API} token={token} thread={thread} /></section>}
 
         <div className="trust-row"><span>BUILT FOR THOUGHTFUL WORK</span><i /><span>Human-reviewed plan</span><i /><span>Evidence checked</span><i /><span>Every claim traceable</span></div>
         {phase === 'idle' && <div className="example-prompts"><div className="example-heading">A few places to start <span>↘</span></div><div className="prompt-grid">{['How is AI changing clinical drug discovery?', 'What is driving the next wave of grid storage?', 'How are cities adapting to extreme heat?'].map((prompt, i) => <button key={prompt} onClick={() => setTopic(prompt)}><span className="prompt-index">0{i + 1}</span><span>{prompt}</span><span className="prompt-arrow">↗</span></button>)}</div></div>}
@@ -254,8 +270,26 @@ function Workspace({ session }: { session: Session }) {
   </div>
 }
 
+/** Hash routes that work without signing in: a shared brief and the email-confirmation link. */
+function useHashRoute() {
+  const read = () => {
+    const [path, query = ''] = window.location.hash.replace(/^#/, '').split('?')
+    return { path, token: new URLSearchParams(query).get('token') || '' }
+  }
+  const [route, setRoute] = useState(read)
+  useEffect(() => {
+    const onChange = () => setRoute(read())
+    window.addEventListener('hashchange', onChange)
+    return () => window.removeEventListener('hashchange', onChange)
+  }, [])
+  return route
+}
+
 export default function App() {
   const { session, ready } = useAuth()
+  const route = useHashRoute()
+  if (route.path === '/shared') return <SharedView token={route.token} />
+  if (route.path === '/verify') return <VerifyEmail token={route.token} />
   if (!ready) return <div className="auth-loading" role="status" aria-label="Loading"><span className="spinner" /></div>
   return session ? <Workspace session={session} /> : <AuthPage />
 }

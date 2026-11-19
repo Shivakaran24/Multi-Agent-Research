@@ -10,6 +10,7 @@ import logging
 import re
 import secrets
 import threading
+import time
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from datetime import datetime, timedelta, timezone
@@ -38,7 +39,7 @@ from research_assistant.auth import (
 from research_assistant.config import Settings
 from research_assistant.followup import answer_followup
 from research_assistant.graph import build_research_graph
-from research_assistant.schemas import ResearchQuestion, RunDetail, RunList
+from research_assistant.schemas import ResearchQuestion, RunDetail, RunList, SharedReport
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,17 @@ class FollowUpRequest(BaseModel):
 
 
 FOLLOWUPS_PER_HOUR = 20
+
+
+class FeedbackRequest(BaseModel):
+    value: int = Field(description="1 = helpful, -1 = not helpful, 0 = clear")
+
+    @field_validator("value")
+    @classmethod
+    def valid_value(cls, value: int) -> int:
+        if value not in (-1, 0, 1):
+            raise ValueError("Feedback must be 1, -1 or 0.")
+        return value
 
 
 class VisualResearchRequest(BaseModel):
@@ -408,6 +420,8 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        if not logging.getLogger().handlers:
+            logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
         app.state.database_ready = active_settings.database_url is None
         app.state.run_semaphore = asyncio.Semaphore(active_settings.max_concurrent_runs)
         try:
@@ -525,12 +539,32 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
         return secure_headers(await call_next(request))
 
     # CORS is outermost so even early auth failures retain the correct browser headers.
+    @app.middleware("http")
+    async def request_log(request: Request, call_next):
+        """Tag each request with an id (also returned as X-Request-ID) and log one line per request."""
+        request_id = secrets.token_hex(6)
+        request.state.request_id = request_id
+        started = time.monotonic()
+        try:
+            response = await call_next(request)
+        except Exception:
+            logger.exception("req=%s %s %s -> unhandled error", request_id, request.method, request.url.path)
+            raise
+        response.headers["X-Request-ID"] = request_id
+        if request.url.path not in HealthAwareTrustedHostMiddleware.PROBE_PATHS:
+            logger.info(
+                "req=%s %s %s -> %s %.0fms user=%s",
+                request_id, request.method, request.url.path, response.status_code,
+                (time.monotonic() - started) * 1000, getattr(request.state, "user_id", None) or "-",
+            )
+        return response
+
     app.add_middleware(HealthAwareTrustedHostMiddleware, allowed_hosts=active_settings.allowed_hosts)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=active_settings.cors_origins,
         allow_credentials=False,
-        allow_methods=["GET", "POST", "DELETE"],
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
         allow_headers=["Authorization", "Content-Type"],
         max_age=600,
     )
@@ -663,6 +697,13 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
                         status_code=429,
                         detail=f"Daily research limit reached ({daily_limit} runs per 24 hours). Try again later.",
                     )
+            if active_settings.email_verification_required:
+                account = await asyncio.to_thread(get_store().get_by_id, user_id)
+                if account is not None and not account.email_verified:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Confirm your email address before starting research. Check your inbox or resend the link.",
+                    )
             try:
                 await asyncio.to_thread(get_store().record_run, thread_id, user_id, body.topic)
             except PermissionError:
@@ -760,6 +801,47 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
             graph, command, config, thread_id,
             user_id=getattr(request.state, "user_id", None), status_on_start="researching",
         )
+
+    @app.put("/research/runs/{thread_id}/feedback", status_code=204)
+    async def set_feedback(thread_id: str, body: FeedbackRequest, request: Request) -> Response:
+        try:
+            uuid.UUID(thread_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="Research thread was not found.") from exc
+        user_id = getattr(request.state, "user_id", None)
+        if not await asyncio.to_thread(get_store().set_feedback, thread_id, user_id, body.value):
+            raise HTTPException(status_code=404, detail="Research thread was not found.")
+        return Response(status_code=204)
+
+    @app.post("/research/runs/{thread_id}/share")
+    async def create_share(thread_id: str, request: Request) -> dict[str, Any]:
+        return {"share_token": await _share(thread_id, request, enable=True)}
+
+    @app.delete("/research/runs/{thread_id}/share", status_code=204)
+    async def revoke_share(thread_id: str, request: Request) -> Response:
+        await _share(thread_id, request, enable=False)
+        return Response(status_code=204)
+
+    async def _share(thread_id: str, request: Request, *, enable: bool) -> str | None:
+        try:
+            uuid.UUID(thread_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="Research thread was not found.") from exc
+        user_id = getattr(request.state, "user_id", None)
+        row = await asyncio.to_thread(get_store().get_run, thread_id, user_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Research thread was not found.")
+        if enable and not row.get("report"):
+            raise HTTPException(status_code=409, detail="A link can be created once the report is complete.")
+        return await asyncio.to_thread(get_store().set_share_token, thread_id, user_id, enable)
+
+    @app.get("/shared/{token}", response_model=SharedReport)
+    async def shared_report(token: str) -> dict[str, Any]:
+        """Public, read-only view of a brief whose owner created a share link."""
+        row = await asyncio.to_thread(get_store().get_shared, token) if 20 <= len(token) <= 100 else None
+        if row is None:
+            raise HTTPException(status_code=404, detail="This shared brief does not exist or the link was turned off.")
+        return row
 
     @app.post("/research/runs/{thread_id}/ask")
     async def ask_followup(thread_id: str, body: FollowUpRequest, request: Request) -> dict[str, Any]:

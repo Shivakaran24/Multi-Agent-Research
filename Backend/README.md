@@ -161,3 +161,11 @@ These named functions lazily create the environment-configured Groq and Tavily c
 ## Citation grounding
 
 The writer receives a short excerpt of each numbered source, not only the researchers' summaries, and is told to cite only sources that support a claim. Any `[n]` marker that does not match a real source is removed from the final report.
+
+## Feedback, sharing and email verification
+
+- `PUT /research/runs/{id}/feedback` with `{"value":1|-1|0}` records a rating (0 clears it).
+- `POST /research/runs/{id}/share` creates a read-only link token and `DELETE` on the same path turns it off. `GET /shared/{token}` is public and returns only the topic, title and report; deleting the run also removes the link.
+- With `REQUIRE_EMAIL_VERIFICATION=true`, `POST /auth/register` emails a single-use link (`/#/verify?token=...`), `POST /auth/verify-email` confirms it, `POST /auth/resend-verification` sends a new one, and starting a run returns 403 until the account is confirmed. Existing accounts are treated as confirmed. Without SMTP in production the setting has no effect, so nobody is locked out.
+
+Every response carries an `X-Request-ID` header and each request is logged as one line with that id, so a user-reported failure can be traced in the server logs.

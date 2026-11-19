@@ -155,6 +155,7 @@ class UserPublic(BaseModel):
     email: str
     full_name: str
     created_at: str
+    email_verified: bool = True
 
 
 class AuthResponse(BaseModel):
@@ -197,6 +198,10 @@ class DeleteAccountRequest(BaseModel):
     password: str = Field(min_length=1, max_length=128)
 
 
+class VerifyEmailRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=200)
+
+
 class MessageResponse(BaseModel):
     detail: str
 
@@ -204,6 +209,7 @@ class MessageResponse(BaseModel):
 class AuthConfig(BaseModel):
     registration_open: bool
     password_reset_available: bool
+    email_verification_required: bool = False
 
 
 class RunSummary(BaseModel):
@@ -212,6 +218,15 @@ class RunSummary(BaseModel):
     title: str | None = None
     status: str = Field(description="planning | review | researching | complete | failed | interrupted")
     created_at: str
+    updated_at: str
+    feedback: int | None = Field(default=None, description="1 = helpful, -1 = not helpful")
+    share_token: str | None = Field(default=None, description="Present while a read-only link is active")
+
+
+class SharedReport(BaseModel):
+    topic: str
+    title: str | None = None
+    report: str
     updated_at: str
 
 

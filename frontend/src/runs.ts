@@ -2,7 +2,7 @@ import { API, errorMessage } from './auth'
 
 export type RunStatus = 'planning' | 'review' | 'researching' | 'complete' | 'failed' | 'interrupted'
 export type Question = { question: string; rationale: string }
-export type RunSummary = { thread_id: string; topic: string; title: string | null; status: RunStatus; created_at: string; updated_at: string }
+export type RunSummary = { thread_id: string; topic: string; title: string | null; status: RunStatus; created_at: string; updated_at: string; feedback?: number | null; share_token?: string | null }
 export type RunDetail = RunSummary & { plan: Question[] | null; report: string | null }
 export type Usage = { used_today: number; daily_limit: number | null; default_iterations: number }
 export type RunList = { runs: RunSummary[]; usage: Usage }
@@ -42,3 +42,18 @@ export async function askFollowUp(token: string, id: string, question: string): 
   const response = await call(`/research/runs/${encodeURIComponent(id)}/ask`, token, { method: 'POST', body: JSON.stringify({ question }) })
   return ((await response.json()) as { answer: string }).answer
 }
+
+export async function setFeedback(token: string, id: string, value: 1 | -1 | 0): Promise<void> {
+  await call(`/research/runs/${encodeURIComponent(id)}/feedback`, token, { method: 'PUT', body: JSON.stringify({ value }) })
+}
+
+export async function createShare(token: string, id: string): Promise<string> {
+  const response = await call(`/research/runs/${encodeURIComponent(id)}/share`, token, { method: 'POST' })
+  return ((await response.json()) as { share_token: string }).share_token
+}
+
+export async function revokeShare(token: string, id: string): Promise<void> {
+  await call(`/research/runs/${encodeURIComponent(id)}/share`, token, { method: 'DELETE' })
+}
+
+export const shareUrl = (shareToken: string) => `${window.location.origin}${window.location.pathname}#/shared?token=${shareToken}`

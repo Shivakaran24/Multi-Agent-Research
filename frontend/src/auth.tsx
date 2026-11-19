@@ -2,10 +2,10 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 
 export const API = (import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
 
-export type User = { id: string; email: string; full_name: string; created_at: string }
+export type User = { id: string; email: string; full_name: string; created_at: string; email_verified?: boolean }
 type AuthResponse = { access_token: string; expires_in: number; user: User }
 export type Session = { token: string; user: User; expiresAt: number }
-export type ServerAuthConfig = { registration_open: boolean; password_reset_available: boolean; unreachable?: boolean }
+export type ServerAuthConfig = { registration_open: boolean; password_reset_available: boolean; email_verification_required?: boolean; unreachable?: boolean }
 
 type AuthContextValue = {
   session: Session | null
@@ -19,6 +19,8 @@ type AuthContextValue = {
   /** Changes the password; this device stays signed in, every other device is signed out. */
   changePassword: (current: string, next: string) => Promise<void>
   deleteAccount: (password: string) => Promise<void>
+  /** Re-reads the account from the server (e.g. after confirming the email address). */
+  refreshUser: () => Promise<void>
 }
 
 const STORAGE_KEY = 'fieldwork.session'
@@ -78,6 +80,14 @@ export async function forgotPassword(email: string): Promise<string> {
 
 export async function resetPassword(token: string, newPassword: string): Promise<string> {
   return ((await (await send('/auth/reset-password', { token, new_password: newPassword })).json()) as { detail: string }).detail
+}
+
+export async function verifyEmail(token: string): Promise<string> {
+  return ((await (await send('/auth/verify-email', { token })).json()) as { detail: string }).detail
+}
+
+export async function resendVerification(sessionToken: string): Promise<string> {
+  return ((await (await send('/auth/resend-verification', {}, sessionToken)).json()) as { detail: string }).detail
 }
 
 /** What this server allows. Older servers without the endpoint get sensible defaults. */
@@ -142,6 +152,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     changePassword: async (current_password, new_password) => {
       if (!session) throw new Error('Please sign in again.')
       start(await postAuth('/auth/change-password', { current_password, new_password }, session.token))
+    },
+    refreshUser: async () => {
+      if (!session) return
+      const response = await fetch(`${API}/auth/me`, { headers: { Authorization: `Bearer ${session.token}` } })
+      if (response.ok) {
+        const next = { ...session, user: (await response.json()) as User }
+        writeSession(next)
+        setSession(next)
+      }
     },
     deleteAccount: async password => {
       if (!session) throw new Error('Please sign in again.')

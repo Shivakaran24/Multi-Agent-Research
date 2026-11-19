@@ -162,7 +162,11 @@ def test_registration_defaults_follow_the_environment():
 def test_auth_config_endpoint_reports_capabilities(tmp_path):
     client, _ = make_client(tmp_path, allow_registration=False)
     with client:
-        assert client.get("/auth/config").json() == {"registration_open": False, "password_reset_available": True}
+        assert client.get("/auth/config").json() == {
+            "registration_open": False,
+            "password_reset_available": True,
+            "email_verification_required": False,
+        }
 
 
 def test_blank_environment_values_are_treated_as_unset(monkeypatch):

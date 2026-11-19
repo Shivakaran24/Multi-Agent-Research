@@ -229,3 +229,17 @@ def test_health_probes_ignore_host_allow_list_but_api_does_not(tmp_path):
     assert client.get("/readyz", headers=internal).status_code == 200
     assert client.get("/auth/config", headers=internal).status_code == 400
     assert client.get("/auth/config").status_code == 200
+
+
+def test_requests_get_an_id_header_and_a_log_line(tmp_path, caplog):
+    import logging
+
+    client, _ = make_client(tmp_path)
+    with client, caplog.at_level(logging.INFO, logger="research_assistant.api"):
+        response = client.get("/research/runs")  # unauthenticated -> 401, still logged
+        health = client.get("/healthz")
+    request_id = response.headers["X-Request-ID"]
+    assert len(request_id) == 12 and health.headers["X-Request-ID"] != request_id
+    lines = [r.getMessage() for r in caplog.records]
+    assert any(f"req={request_id}" in line and "-> 401" in line for line in lines)
+    assert not any("/healthz" in line for line in lines)  # probes stay quiet

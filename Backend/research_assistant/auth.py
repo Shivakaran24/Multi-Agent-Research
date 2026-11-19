@@ -49,6 +49,7 @@ from research_assistant.schemas import (
     RegisterRequest,
     ResetPasswordRequest,
     UserPublic,
+    VerifyEmailRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -166,9 +167,16 @@ class User:
     password_hash: str
     created_at: str
     token_version: int = 0
+    email_verified: int = 1
 
     def public(self) -> UserPublic:
-        return UserPublic(id=self.id, email=self.email, full_name=self.full_name, created_at=self.created_at)
+        return UserPublic(
+            id=self.id,
+            email=self.email,
+            full_name=self.full_name,
+            created_at=self.created_at,
+            email_verified=bool(self.email_verified),
+        )
 
 
 _SCHEMA = (
@@ -191,6 +199,12 @@ _SCHEMA = (
         expires_at TEXT NOT NULL,
         used INTEGER NOT NULL DEFAULT 0
     )""",
+    """CREATE TABLE IF NOT EXISTS email_tokens (
+        token_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        expires_at TEXT NOT NULL,
+        used INTEGER NOT NULL DEFAULT 0
+    )""",
 )
 
 # Columns added after the first release. Applied idempotently so existing databases upgrade in place.
@@ -201,10 +215,13 @@ _MIGRATIONS = (
     ("research_runs", "plan", "TEXT"),
     ("research_runs", "report", "TEXT"),
     ("research_runs", "updated_at", "TEXT"),
+    ("users", "email_verified", "INTEGER NOT NULL DEFAULT 1"),
+    ("research_runs", "feedback", "INTEGER"),
+    ("research_runs", "share_token", "TEXT"),
 )
 
-_USER_COLUMNS = "id, email, full_name, password_hash, created_at, token_version"
-_RUN_COLUMNS = "thread_id, user_id, topic, title, status, created_at, COALESCE(updated_at, created_at), plan, report"
+_USER_COLUMNS = "id, email, full_name, password_hash, created_at, token_version, email_verified"
+_RUN_COLUMNS = "thread_id, user_id, topic, title, status, created_at, COALESCE(updated_at, created_at), plan, report, feedback, share_token"
 
 
 class UserStore:
@@ -261,15 +278,25 @@ class UserStore:
 
     # ---- users
 
-    def create_user(self, *, email: str, full_name: str, password_hash: str) -> User:
+    def create_user(
+        self, *, email: str, full_name: str, password_hash: str, email_verified: bool = True
+    ) -> User:
         user = User(
-            id=str(uuid.uuid4()), email=email, full_name=full_name, password_hash=password_hash, created_at=_now()
+            id=str(uuid.uuid4()),
+            email=email,
+            full_name=full_name,
+            password_hash=password_hash,
+            created_at=_now(),
+            email_verified=int(email_verified),
         )
         try:
             with self._connect() as conn:
                 conn.execute(
-                    self._sql("INSERT INTO users (id, email, full_name, password_hash, created_at) VALUES (?, ?, ?, ?, ?)"),
-                    (user.id, user.email, user.full_name, user.password_hash, user.created_at),
+                    self._sql(
+                        "INSERT INTO users (id, email, full_name, password_hash, created_at, email_verified) "
+                        "VALUES (?, ?, ?, ?, ?, ?)"
+                    ),
+                    (user.id, user.email, user.full_name, user.password_hash, user.created_at, user.email_verified),
                 )
         except self._integrity as exc:
             raise EmailTaken(email) from exc
@@ -312,6 +339,7 @@ class UserStore:
                 ).fetchall()
             ]
             conn.execute(self._sql("DELETE FROM password_resets WHERE user_id = ?"), (user_id,))
+            conn.execute(self._sql("DELETE FROM email_tokens WHERE user_id = ?"), (user_id,))
             conn.execute(self._sql("DELETE FROM research_runs WHERE user_id = ?"), (user_id,))
             conn.execute(self._sql("DELETE FROM users WHERE id = ?"), (user_id,))
         return threads
@@ -348,6 +376,36 @@ class UserStore:
                 self._sql("SELECT user_id FROM password_resets WHERE token_hash = ?"), (digest,)
             ).fetchone()
         return row[0] if row else None
+
+    # ---- email verification
+
+    def create_email_token(self, user_id: str, ttl_minutes: int) -> str:
+        """Single-use verification token (only its hash is stored); replaces any earlier one."""
+        token = secrets.token_urlsafe(32)
+        expires = (datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)).isoformat(timespec="microseconds")
+        with self._connect() as conn:
+            conn.execute(self._sql("DELETE FROM email_tokens WHERE user_id = ?"), (user_id,))
+            conn.execute(
+                self._sql("INSERT INTO email_tokens (token_hash, user_id, expires_at, used) VALUES (?, ?, ?, 0)"),
+                (self._hash_token(token), user_id, expires),
+            )
+        return token
+
+    def verify_email(self, token: str) -> str | None:
+        """Consume a valid token and mark that account verified. Returns the user id, or None."""
+        digest = self._hash_token(token)
+        with self._connect() as conn:
+            cursor = conn.execute(
+                self._sql("UPDATE email_tokens SET used = 1 WHERE token_hash = ? AND used = 0 AND expires_at > ?"),
+                (digest, _now()),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = conn.execute(self._sql("SELECT user_id FROM email_tokens WHERE token_hash = ?"), (digest,)).fetchone()
+            if row is None:
+                return None
+            conn.execute(self._sql("UPDATE users SET email_verified = 1 WHERE id = ?"), (row[0],))
+        return row[0]
 
     # ---- research runs / history
 
@@ -390,10 +448,11 @@ class UserStore:
 
     @staticmethod
     def _run(row: Any, *, detail: bool) -> dict[str, Any]:
-        thread_id, user_id, topic, title, status, created_at, updated_at, plan, report = row
+        thread_id, user_id, topic, title, status, created_at, updated_at, plan, report, feedback, share_token = row
         data: dict[str, Any] = {
             "thread_id": thread_id, "user_id": user_id, "topic": topic, "title": title,
             "status": status, "created_at": created_at, "updated_at": updated_at,
+            "feedback": feedback, "share_token": share_token,
         }
         if detail:
             data["plan"] = json.loads(plan) if plan else None
@@ -430,6 +489,37 @@ class UserStore:
             params += (user_id,)
         with self._connect() as conn:
             return conn.execute(self._sql(query), params).rowcount == 1
+
+    def set_feedback(self, thread_id: str, user_id: str | None, value: int) -> bool:
+        """Record 1 (helpful) or -1 (not helpful); 0 clears it. False when the run is not the caller's."""
+        query = "UPDATE research_runs SET feedback = ? WHERE thread_id = ?"
+        params: tuple[Any, ...] = (value or None, thread_id)
+        if user_id is not None:
+            query += " AND user_id = ?"
+            params += (user_id,)
+        with self._connect() as conn:
+            return conn.execute(self._sql(query), params).rowcount == 1
+
+    def set_share_token(self, thread_id: str, user_id: str | None, enable: bool) -> str | None:
+        """Create (or keep) a read-only link token, or revoke it. Returns the active token, if any."""
+        run = self.get_run(thread_id, user_id)
+        if run is None:
+            raise KeyError(thread_id)
+        token = (run["share_token"] or secrets.token_urlsafe(24)) if enable else None
+        with self._connect() as conn:
+            conn.execute(self._sql("UPDATE research_runs SET share_token = ? WHERE thread_id = ?"), (token, thread_id))
+        return token
+
+    def get_shared(self, token: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                self._sql(
+                    "SELECT topic, title, report, COALESCE(updated_at, created_at) FROM research_runs "
+                    "WHERE share_token = ? AND report IS NOT NULL"
+                ),
+                (token,),
+            ).fetchone()
+        return None if row is None else {"topic": row[0], "title": row[1], "report": row[2], "updated_at": row[3]}
 
     def owns_run(self, thread_id: str, user_id: str) -> bool:
         with self._connect() as conn:
@@ -593,16 +683,36 @@ def create_auth_router(
             raise HTTPException(status_code=401, detail="Incorrect password.")
         password_limiter.clear(key)
 
+    def queue_verification(user: User, settings: Settings, background: BackgroundTasks) -> None:
+        token = get_store().create_email_token(user.id, settings.reset_token_ttl_minutes)
+        link = f"{settings.reset_link_base}/#/verify?token={token}"
+        mailer = get_mailer() if get_mailer else create_mailer(settings)
+
+        def deliver() -> None:
+            try:
+                mailer.send(
+                    user.email,
+                    "Confirm your Fieldwork email",
+                    f"Hi {user.full_name},\n\nConfirm your email to start researching. The link works once and "
+                    f"expires in {settings.reset_token_ttl_minutes} minutes:\n\n{link}\n\n"
+                    "If you did not create this account, you can ignore this email.\n",
+                )
+            except Exception:
+                logger.exception("Could not send verification email")
+
+        background.add_task(deliver)
+
     @router.get("/config", response_model=AuthConfig)
     def auth_config() -> AuthConfig:
         settings = get_settings()
         return AuthConfig(
             registration_open=settings.registration_open,
             password_reset_available=settings.password_reset_available,
+            email_verification_required=settings.email_verification_required,
         )
 
     @router.post("/register", status_code=201, response_model=AuthResponse)
-    def register(body: RegisterRequest, request: Request) -> AuthResponse:
+    def register(body: RegisterRequest, request: Request, background: BackgroundTasks) -> AuthResponse:
         settings = get_settings()
         if not settings.registration_open:
             raise HTTPException(status_code=403, detail="Registration is currently disabled.")
@@ -612,10 +722,15 @@ def create_auth_router(
         register_limiter.record(ip)
         try:
             user = get_store().create_user(
-                email=body.email, full_name=body.full_name, password_hash=hash_password(body.password)
+                email=body.email,
+                full_name=body.full_name,
+                password_hash=hash_password(body.password),
+                email_verified=not settings.email_verification_required,
             )
         except EmailTaken:
             raise HTTPException(status_code=409, detail="An account with this email already exists.") from None
+        if settings.email_verification_required:
+            queue_verification(user, settings, background)
         return issue(user, settings)
 
     @router.post("/login", response_model=AuthResponse)
@@ -696,6 +811,29 @@ def create_auth_router(
             raise HTTPException(status_code=400, detail="This reset link is invalid or has expired. Request a new one.")
         get_store().set_password(user_id, hash_password(body.new_password))
         return MessageResponse(detail="Password updated. Sign in with your new password.")
+
+    @router.post("/verify-email", response_model=MessageResponse)
+    def verify_email(body: VerifyEmailRequest, request: Request) -> MessageResponse:
+        ip = f"verify|{client_ip(request)}"
+        if wait := login_limiter.retry_after(ip):
+            raise too_many(wait)
+        if get_store().verify_email(body.token) is None:
+            login_limiter.record(ip)
+            raise HTTPException(status_code=400, detail="This confirmation link is invalid or has expired. Request a new one.")
+        return MessageResponse(detail="Email confirmed. You can start researching.")
+
+    @router.post("/resend-verification", status_code=202, response_model=MessageResponse)
+    def resend_verification(request: Request, background: BackgroundTasks) -> MessageResponse:
+        settings = get_settings()
+        user = current_user(request)
+        if not settings.email_verification_required or user.email_verified:
+            return MessageResponse(detail="Your email is already confirmed.")
+        key = f"resend|{user.id}"
+        if wait := forgot_limiter.retry_after(key):
+            raise too_many(wait)
+        forgot_limiter.record(key)
+        queue_verification(user, settings, background)
+        return MessageResponse(detail="A new confirmation link is on its way.")
 
     @router.post("/delete-account", status_code=204)
     async def delete_account(body: DeleteAccountRequest, request: Request) -> Response:

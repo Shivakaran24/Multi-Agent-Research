@@ -40,6 +40,10 @@ Accounts support password change and email reset (set `SMTP_*`; without SMTP, pr
 - Cancel a running job, and pick research depth (1-3 review passes) per run.
 - Export a brief as Markdown, a standalone HTML page (opens in Word), or print/save as PDF. Citations render as a Sources list.
 - Follow-up questions on a finished brief, answered only from that brief; the writer sees source excerpts and invalid citation numbers are stripped.
+- Thumbs up/down on each brief, and a private-by-default read-only share link that the owner can turn off at any time.
+- Word (.docx) export built in the browser, alongside Markdown, HTML and print/PDF.
+- Optional email verification (`REQUIRE_EMAIL_VERIFICATION=true`, needs SMTP in production): new accounts must confirm their address before starting research.
+- Live progress lines show what each researcher found while a run is going.
 
 ## Testing
 
