@@ -73,8 +73,8 @@ export default function ResearchOptionsPanel({ value, onChange, token, topic, on
       <label>Length<select value={value.length} onChange={e => set('length', e.target.value as Length)}>{LENGTHS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>
       <label>Sources from<select value={value.timeRange} onChange={e => set('timeRange', e.target.value as TimeRange)}>{WINDOWS.map(([v, l]) => <option key={v || 'any'} value={v}>{l}</option>)}</select></label>
       <label>Write in<input list="brief-languages" maxLength={40} value={value.language} onChange={e => set('language', e.target.value)} /><datalist id="brief-languages">{LANGUAGES.map(l => <option key={l} value={l} />)}</datalist></label>
-      <label className="options-check"><input type="checkbox" checked={value.verify} onChange={e => set('verify', e.target.checked)} /> Check claims against sources <small>uses extra tokens</small></label>
     </div>
+    <p className="verified-note"><strong>✓ Verified sources only.</strong> Every source is opened and checked before it can be cited, and statements the sources do not support are removed.</p>
     <label className="options-check"><input type="checkbox" checked={value.compare} onChange={e => set('compare', e.target.checked)} /> Compare with a second topic</label>
     {value.compare && <input className="options-wide" aria-label="Second topic to compare" maxLength={900} placeholder="Second topic, e.g. pumped hydro storage" value={value.compareWith} onChange={e => set('compareWith', e.target.value)} />}
     <label className="options-block">Your own sources <small>public web page links, one per line (up to 5)</small>

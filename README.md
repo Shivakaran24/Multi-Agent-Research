@@ -13,14 +13,14 @@ Fieldwork turns a topic into a cited research brief. You type a question, an AI 
 2. **Research.** One researcher per question runs in parallel: search, filter and rank sources, read excerpts, summarise findings.
 3. **Review.** A reviewer decides whether the findings have gaps and, if so, requests another pass (1–3 passes, your choice).
 4. **Write.** The writer produces the brief in your chosen style, audience, length and language. Citations are validated against the real sources, so invented numbers are stripped.
-5. **Check (optional).** A claim-check pass marks sentences the sources don't support as *(unverified)*.
+5. **Verify.** Before writing, every source is opened on the live web and must load and match what the search reported (papers with a DOI or arXiv ID are confirmed against Crossref/arXiv). Sources that fail are dropped, and the writer sees passages taken from the verified pages. After writing, a claim check removes any statement the verified sources do not support. If no source can be verified, no brief is written.
 
 ### Features
 
 **Research quality**
 - Source filtering: duplicates, thin pages and blocked domains are dropped; authoritative hosts (.gov, .edu, .int and a preferred list) rank higher.
 - Per-run time window (day, week, month, year).
-- Claim check, which can be switched off per run to save tokens.
+- Verified-only mode (default): live source checks plus removal of unsupported statements. It costs extra time and tokens per run; set `VERIFIED_ONLY=false` to go back to the older marked-as-unverified claim check.
 - Your own sources: up to 5 links, up to 3 PDFs (text layer, 5 MB each) and pasted notes are treated as sources alongside web results. Uploaded PDFs are cited as uploaded files and kept only for that run.
 
 **Control over output**
@@ -156,6 +156,6 @@ Caddy obtains and renews TLS certificates. The API runs a single worker because 
 - Google/OIDC sign-in, audit logging and multi-worker rate limiting are not implemented.
 - PDFs must have a text layer (scanned images are not read); only the first 60 pages and 30,000 characters are used. Scheduled runs reuse saved options but not links or PDFs.
 - The brief appears when the writer finishes, not word by word.
-- Claim checking is a model judgement, not a guarantee of accuracy; always read the cited sources for anything important.
+- Verification proves a source opens and matches what was reported, and the claim check is a model judgement. Neither guarantees a claim is true, and paywalled sites that block automated requests are dropped. Read the cited sources for anything important.
 
 More detail: [Backend/README.md](Backend/README.md) (API, credentials, checkpoints) and [frontend/README.md](frontend/README.md).

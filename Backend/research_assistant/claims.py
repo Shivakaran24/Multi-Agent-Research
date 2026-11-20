@@ -28,12 +28,15 @@ SYSTEM = (
 )
 
 
-def evidence_text(findings: list[ResearchFinding], *, summary_chars: int = 500, excerpt_chars: int = 250) -> str:
+def evidence_text(
+    findings: list[ResearchFinding], *, summary_chars: int = 500, excerpt_chars: int = 250, include_summaries: bool = True
+) -> str:
     """Compact evidence with the same source numbering the writer used."""
     numbering: dict[str, int] = {}
     lines: list[str] = []
     for finding in findings:
-        lines.append(f"Summary: {finding.summary[:summary_chars]}")
+        if include_summaries:
+            lines.append(f"Summary: {finding.summary[:summary_chars]}")
         for source in finding.sources:
             if source.url not in numbering:
                 numbering[source.url] = len(numbering) + 1
@@ -83,3 +86,97 @@ def check_claims(markdown: str, findings: list[ResearchFinding], checker: Any) -
     except Exception:
         logger.warning("Claim check failed; leaving the brief unmarked", exc_info=True)
         return markdown, 0
+
+
+# --- strict mode: only statements the verified sources support survive -----------------------------
+
+STRICT_NOTE = "> Verification: {n} statement{s} that the verified sources do not support {were} removed."
+UNCHECKED_NOTE = (
+    "> ⚠ The independent claim check could not run for this brief, so its statements were not checked "
+    "against the sources. Verify important points yourself."
+)
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"“(\[])")
+
+
+def _table_block(lines: list[str], index: int) -> tuple[int, int]:
+    start = index
+    while start > 0 and lines[start - 1].lstrip().startswith("|"):
+        start -= 1
+    end = index
+    while end + 1 < len(lines) and lines[end + 1].lstrip().startswith("|"):
+        end += 1
+    return start, end
+
+
+def remove_unsupported(markdown: str, quotes: list[str]) -> tuple[str, int]:
+    """Delete the sentence (or list item / table row) containing each unsupported quote. Headings stay."""
+    removed = 0
+    for quote in quotes:
+        span = _find(markdown, quote)
+        if span is None:
+            continue
+        lines = markdown.split("\n")
+        offset = 0
+        for index, line in enumerate(lines):
+            if offset <= span[0] <= offset + len(line):
+                break
+            offset += len(line) + 1
+        else:
+            continue
+        stripped = line.lstrip()
+        if stripped.startswith("#") or stripped.startswith(">"):
+            continue
+        if stripped.startswith("|"):
+            first, _ = _table_block(lines, index)
+            if index - first < 2:  # header and separator rows stay
+                continue
+            del lines[index]
+        else:
+            lead = re.match(r"\s*(?:[-*+]|\d+\.)\s+", line)
+            prefix = lead.group(0) if lead else ""
+            body = line[len(prefix):]
+            local = span[0] - offset - len(prefix)
+            pieces, position, keep = [], 0, []
+            for part in _SENTENCE_END.split(body):
+                begin = body.find(part, position)
+                position = begin + len(part)
+                if not (begin <= local < position or begin < local + (span[1] - span[0]) <= position):
+                    keep.append(part)
+                pieces.append(part)
+            if len(keep) == len(pieces):
+                continue
+            if keep:
+                lines[index] = prefix + " ".join(keep)
+            else:
+                del lines[index]
+        markdown = re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
+        removed += 1
+    return markdown, removed
+
+
+def strict_check(markdown: str, findings: list[ResearchFinding], checker: Any, *, passes: int = 2) -> str:
+    """Remove statements the verified source passages do not support; say so (or say the check failed)."""
+    total = 0
+    try:
+        for _ in range(passes):
+            result = invoke_with_retry(
+                checker,
+                [
+                    SystemMessage(content=SYSTEM),
+                    HumanMessage(
+                        content=f"Brief:\n{markdown[:9000]}\n\nEvidence:\n"
+                        + evidence_text(findings, excerpt_chars=700, include_summaries=False)
+                    ),
+                ],
+                ClaimCheck,
+            )
+            markdown, removed = remove_unsupported(markdown, result.unsupported)
+            total += removed
+            if not removed:
+                break
+    except Exception:
+        logger.warning("Strict claim check failed", exc_info=True)
+        return markdown.rstrip() + "\n\n" + UNCHECKED_NOTE
+    if total:
+        markdown = markdown.rstrip() + "\n\n" + STRICT_NOTE.format(n=total, s="" if total == 1 else "s", were="was" if total == 1 else "were")
+    return markdown

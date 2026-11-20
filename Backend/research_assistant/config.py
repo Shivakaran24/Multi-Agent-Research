@@ -79,6 +79,9 @@ class Settings(BaseSettings):
     # domains, and a ranking bonus for authoritative ones (.gov/.edu/.int plus this list).
     # Run a fact-check pass after writing; users can override per run.
     claim_check: bool = True
+    # Verified-only mode: every source is opened and checked before it can be cited, and statements the
+    # verified sources do not support are removed (not just marked). Turn off only for offline tests.
+    verified_only: bool = True
     search_time_range: Literal["day", "week", "month", "year"] | None = None
     blocked_domains: list[str] = Field(
         default_factory=lambda: [

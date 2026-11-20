@@ -13,8 +13,9 @@ from langchain_groq import ChatGroq
 from tavily import TavilyClient
 
 from research_assistant.config import Settings
-from research_assistant.claims import check_claims
+from research_assistant.claims import check_claims, strict_check
 from research_assistant.sources import filter_and_rank
+from research_assistant.verify import VerificationReport, verify_findings
 from research_assistant.llm_retry import invoke_with_retry
 from research_assistant.schemas import (
     ClaimCheck,
@@ -27,7 +28,7 @@ from research_assistant.schemas import (
 )
 from research_assistant.state import ResearcherWorkerState, ResearchState
 
-SearchFn = Callable[..., list[dict[str, Any]]]
+SearchFn = Callable[[str], list[dict[str, Any]]]
 NodeFn = Callable[[Any], dict[str, Any]]
 
 
@@ -52,7 +53,7 @@ def sanitize_citations(markdown: str, source_count: int) -> str:
     return _CITATION.sub(keep, markdown)
 
 
-def _citation_context(findings: list[ResearchFinding]) -> tuple[str, str]:
+def _citation_context(findings: list[ResearchFinding], excerpt_chars: int = EXCERPT_FOR_WRITER) -> tuple[str, str]:
     """Build evidence with stable citation numbers and a deterministic bibliography."""
     unique_sources: dict[str, Source] = {}
     citation_by_url: dict[str, int] = {}
@@ -74,7 +75,7 @@ def _citation_context(findings: list[ResearchFinding]) -> tuple[str, str]:
             "citation": index,
             "title": source.title,
             "url": url,
-            "excerpt": (source.content or source.snippet or "")[:EXCERPT_FOR_WRITER],
+            "excerpt": (source.content or source.snippet or "")[:excerpt_chars],
         }
         for index, (url, source) in enumerate(unique_sources.items(), start=1)
     ]
@@ -177,16 +178,31 @@ def planner_hint(options: dict[str, Any]) -> str:
     return " ".join(hints)
 
 
+def _no_verified_sources(topic: str, verification: VerificationReport) -> str:
+    """The brief when nothing could be verified: say so instead of writing from unchecked material."""
+    reasons = "\n".join(f"- {url}: {reason}" for url, reason in verification.dropped[:8])
+    detail = f"\n\nSources that were tried:\n{reasons}" if reasons else ""
+    return (
+        f"# {topic.strip()[:120] or 'Research brief'}\n\n"
+        "No brief was written because none of the sources found could be verified. Every source must open "
+        "and match what was reported before it can be cited, and nothing could be confirmed. Try rephrasing "
+        f"the topic, widening the time window, or adding your own links or PDFs.{detail}\n\n## Sources\n\nNo verified sources."
+    )
+
+
 def create_node_implementations(
     *,
     settings: Settings | None = None,
     llm: Any | None = None,
     fast_llm: Any | None = None,
     search: SearchFn | None = None,
+    verify_sources: Callable[[list[ResearchFinding], str], tuple[list[ResearchFinding], VerificationReport]] | None = None,
 ) -> NodeImplementations:
     """Create injectable nodes; defaults use Groq and Tavily from environment settings."""
     settings = settings or Settings()
     using_default_model = llm is None
+    using_default_search = search is None
+    verifier = verify_sources
     if llm is None:
         if not settings.groq_api_key:
             raise ValueError("Set GROQ_API_KEY before creating the default language model.")
@@ -209,6 +225,8 @@ def create_node_implementations(
             **reasoning_options,
         )
     fast_llm = fast_llm or llm
+    if verifier is None and using_default_search and settings.verified_only:
+        verifier = verify_findings  # opens every source on the live web; tests inject fakes instead
     fallback_llm = fallback_fast_llm = None
     if using_default_model and settings.groq_fallback_model and settings.groq_fallback_model != settings.groq_model:
         fallback_options = (
@@ -384,14 +402,20 @@ def create_node_implementations(
 
     def writer_node(state: ResearchState) -> dict[str, Any]:
         """Synthesize findings into a report and append a deterministic source list."""
-        evidence, bibliography = _citation_context(state.get("findings", []))
         options = state.get("options") or {}
+        findings = state.get("findings", [])
+        verification: VerificationReport | None = None
+        if verifier is not None:
+            findings, verification = verifier(findings, state["topic"])
+            if verification.verified == 0:
+                return {"report": _no_verified_sources(state["topic"], verification)}
+        evidence, bibliography = _citation_context(findings, 700 if verification else EXCERPT_FOR_WRITER)
         writer = structured(llm, FinalReport)
         notes = str(options.get("notes") or "")[:3000]
         report = _invoke_with_rate_limit_retry(
             writer,
             [
-                SystemMessage(content=writer_instructions(options)),
+                SystemMessage(content=writer_instructions(options) + (" Only state facts found in the numbered source excerpts; leave out anything they do not support." if verification else "")),
                 HumanMessage(
                     content=(
                         f"Main topic: {state['topic']}\n\n"
@@ -406,8 +430,13 @@ def create_node_implementations(
         source_count = len(bibliography.splitlines()) if bibliography else 0
         markdown = sanitize_citations(report.markdown, source_count)
         verify = options.get("verify_claims")
-        if (settings.claim_check if verify is None else verify) and state.get("findings"):
-            markdown, _ = check_claims(markdown, state["findings"], structured(fast_llm, ClaimCheck))
+        if verification is not None:
+            # Verified-only: always checked, and unsupported statements are removed.
+            markdown = strict_check(markdown, findings, structured(fast_llm, ClaimCheck))
+            if verification.note:
+                markdown = markdown.rstrip() + "\n\n" + verification.note
+        elif (settings.claim_check if verify is None else verify) and findings:
+            markdown, _ = check_claims(markdown, findings, structured(fast_llm, ClaimCheck))
 
         sources = bibliography or "No web sources were returned."
         return {"report": f"# {title}\n\n{markdown}\n\n## Sources\n\n{sources}"}
