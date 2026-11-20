@@ -21,7 +21,10 @@ QUESTIONS = [
 INTERRUPT = {"kind": "review_research_plan", "questions": QUESTIONS}
 
 
-def make_pdf(text: str) -> bytes:
+DEFAULT_PDF_TEXT = "Grid batteries cut peak costs across the Spanish market in 2024 according to the operator. " * 3
+
+
+def make_pdf(text: str = DEFAULT_PDF_TEXT) -> bytes:
     """Create a minimal one-page PDF with a text layer for tests."""
     safe = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
     stream = f"BT /F1 10 Tf 20 700 Td ({safe}) Tj ET".encode()
