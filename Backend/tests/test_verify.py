@@ -7,7 +7,7 @@ from research_assistant.claims import UNCHECKED_NOTE, remove_unsupported, strict
 from research_assistant.config import Settings
 from research_assistant.nodes import create_node_implementations
 from research_assistant.schemas import ClaimCheck, FinalReport, ResearchFinding, Source
-from research_assistant.verify import Verdict, VerificationReport, verify_findings, verify_source
+from research_assistant.verify import Verdict, verify_findings, verify_source
 
 PAGE = "Battery storage in Spain reduced curtailment sharply in 2024 according to the grid operator. " * 5
 
@@ -186,9 +186,15 @@ def test_fetch_page_against_a_local_server(monkeypatch):
                 "/img": (200, "image/png", b"\x89PNG"),
             }
             if self.path == "/moved":
-                self.send_response(302); self.send_header("Location", "/page"); self.end_headers(); return
+                self.send_response(302)
+                self.send_header("Location", "/page")
+                self.end_headers()
+                return
             status, kind, body = routes.get(self.path, (404, "text/plain", b"nope"))
-            self.send_response(status); self.send_header("Content-Type", kind); self.end_headers(); self.wfile.write(body)
+            self.send_response(status)
+            self.send_header("Content-Type", kind)
+            self.end_headers()
+            self.wfile.write(body)
 
         def log_message(self, *args):
             pass
