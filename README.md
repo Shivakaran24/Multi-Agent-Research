@@ -21,7 +21,7 @@ Fieldwork turns a topic into a cited research brief. You type a question, an AI 
 - Source filtering: duplicates, thin pages and blocked domains are dropped; authoritative hosts (.gov, .edu, .int and a preferred list) rank higher.
 - Per-run time window (day, week, month, year).
 - Claim check, which can be switched off per run to save tokens.
-- Your own sources: up to 5 links plus pasted notes are treated as sources alongside web results.
+- Your own sources: up to 5 links, up to 3 PDFs (text layer, 5 MB each) and pasted notes are treated as sources alongside web results. Uploaded PDFs are cited as uploaded files and kept only for that run.
 
 **Control over output**
 - Styles: brief, executive, deep dive, comparison. Audience, length and output language are selectable.
@@ -33,6 +33,7 @@ Fieldwork turns a topic into a cited research brief. You type a question, an AI 
 - History per user, with search and tags. Interrupted runs can be re-run; running jobs can be cancelled.
 - Follow-up questions answered only from the finished brief.
 - Recurring research (daily, weekly, monthly) with an emailed "what changed" note.
+- Saved templates: store a topic plus all options (style, audience, length, language, time window, links, notes) under a name and apply it in one click. Recurring research can reuse the composer's options.
 - Email a brief to yourself.
 - Export to Markdown, HTML, Word (.docx, built in the browser) or print/PDF.
 - Private-by-default read-only share links, revocable at any time.
@@ -43,6 +44,7 @@ Fieldwork turns a topic into a cited research brief. You type a question, an AI 
 **Accounts and cost control**
 - Email and password accounts (scrypt hashes, signed expiring sessions), password reset by email, optional email verification.
 - Optional invite codes for registration, and an admin usage page for emails listed in `ADMIN_EMAILS`.
+- Model fallback: set `GROQ_FALLBACK_MODEL` and a rate-limited (HTTP 429) call switches to that second Groq model immediately, since Groq limits apply per model.
 - Per-user daily run limit, concurrent-run limit and daily token budget, with a live "tries and tokens left" counter.
 - Optional demo account for public showcases.
 - Dark mode (follows the system setting; toggle in the top bar).
@@ -132,6 +134,7 @@ All settings are environment variables; see `Backend/.env.example` for the full 
 | `INITIAL_QUESTIONS`, `MAX_ITERATIONS`, `SEARCH_RESULTS_PER_QUERY`, `GROQ_*_MAX_TOKENS` | Research depth and size |
 | `SMTP_*`, `APP_BASE_URL` | Password reset, verification, emailed briefs and schedules |
 | `REQUIRE_EMAIL_VERIFICATION`, `CLAIM_CHECK`, `SCHEDULER_ENABLED` | Feature switches |
+| `GROQ_FALLBACK_MODEL` | Second Groq model used when the main one is rate limited (e.g. `llama-3.3-70b-versatile`) |
 
 The default budget is moderate (four questions, one review pass, four results per question). Free Groq tiers can rate-limit it; lower `INITIAL_QUESTIONS`, `SEARCH_RESULTS_PER_QUERY` or the token settings if you see 429 errors. Transient 429s are retried with backoff.
 
@@ -151,7 +154,7 @@ Caddy obtains and renews TLS certificates. The API runs a single worker because 
 ## Limitations
 
 - Google/OIDC sign-in, audit logging and multi-worker rate limiting are not implemented.
-- PDF upload is not supported; use links or pasted notes.
+- PDFs must have a text layer (scanned images are not read); only the first 60 pages and 30,000 characters are used. Scheduled runs reuse saved options but not links or PDFs.
 - The brief appears when the writer finishes, not word by word.
 - Claim checking is a model judgement, not a guarantee of accuracy; always read the cited sources for anything important.
 

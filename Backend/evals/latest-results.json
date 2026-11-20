@@ -1,18 +1,70 @@
 {
   "dataset": "D:\\Multi Agent Research Assistant\\Backend\\evals\\dataset.jsonl",
-  "cases_total": 1,
-  "cases_succeeded": 0,
+  "cases_total": 4,
+  "cases_succeeded": 2,
   "mean_scores": {
-    "overall_score": null,
-    "coverage_score": null,
-    "grounding_score": null,
-    "citation_score": null,
-    "clarity_score": null
+    "overall_score": 3.5,
+    "coverage_score": 3.5,
+    "grounding_score": 3.0,
+    "citation_score": 2.5,
+    "clarity_score": 4.0
   },
   "results": [
     {
       "id": "cold-climate-heat-pumps",
-      "error": "RateLimitError"
+      "scores": {
+        "overall_score": 4,
+        "coverage_score": 3,
+        "grounding_score": 3,
+        "citation_score": 3,
+        "clarity_score": 4,
+        "rationale": "The report covers most of the requested aspects but omits detailed installation considerations and provides some unverified claims. Grounding is moderate; many citations are from blogs or commercial sites, which reduces confidence. Citation quality is acceptable but not high. Clarity is strong with well‑structured sections. Overall, the answer is solid but not exceptional, earning a 4.",
+        "issues": [
+          "Missing explicit discussion of installation considerations (e.g., sizing, ductwork, placement)",
+          "Several claims marked *(unverified)* (e.g., payback period) lack source verification",
+          "Reliance on non‑academic, commercial blogs for key efficiency data",
+          "Limited quantitative comparison of backup heat options and dual‑fuel economics",
+          "Defrost energy consumption and its impact on seasonal performance not addressed",
+          "No regional case studies to contextualize local energy price ratios"
+        ]
+      },
+      "citation_checks": {
+        "has_sources_section": true,
+        "source_count": 16,
+        "inline_citation_count": 38,
+        "citation_integrity": 1.0,
+        "dangling_citations": []
+      }
+    },
+    {
+      "id": "non-english-llm-bias",
+      "error": "BadRequestError"
+    },
+    {
+      "id": "long-duration-storage",
+      "scores": {
+        "overall_score": 3,
+        "coverage_score": 4,
+        "grounding_score": 3,
+        "citation_score": 2,
+        "clarity_score": 4,
+        "rationale": "The answer covers the requested aspects and is well organized, but many claims lack direct, verifiable support from the cited sources. The citation quality is low because references are not tightly matched to statements. Grounding is adequate but not strong; the presence of unverified claims and vague cost/system‑value details reduces confidence. Overall, the report is useful but not of high quality.",
+        "issues": [
+          "Several statements are marked unverified but still presented as facts, e.g., the global pumped‑hydro capacity figure and the exact RTE ranges for each technology. The numbered citations do not always point to evidence that directly supports the claim; many are generic reports or unrelated to the specific data. The cost and system‑value discussion is brief and lacks quantitative references, leaving the reader without concrete grounding. The definition of long‑duration (hours) is not explicitly stated, which could cause confusion when comparing technologies.",
+          "The report relies on a single source for the 35 GW pumped‑hydro figure ([1] and [4]), but neither source appears to provide that exact number. Similarly, the pilot capacities for zinc‑flow and redox‑flow are cited with source [2], which is a market‑report link that does not detail those specific projects."
+        ]
+      },
+      "citation_checks": {
+        "has_sources_section": true,
+        "source_count": 16,
+        "inline_citation_count": 17,
+        "citation_integrity": 1.0,
+        "dangling_citations": []
+      }
+    },
+    {
+      "id": "mass-timber-tradeoffs",
+      "error": "BadRequestError"
     }
   ]
 }

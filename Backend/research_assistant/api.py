@@ -40,6 +40,7 @@ from research_assistant.auth import (
 from research_assistant.config import Settings
 from research_assistant.followup import answer_followup, summarize_changes
 from research_assistant.usage import UsageTracker
+from research_assistant.documents import MAX_PDF_BYTES, DocumentError, extract_pdf_text, finding_from_documents
 from research_assistant.usersources import fetch_user_sources
 from research_assistant.graph import build_research_graph
 from research_assistant.schemas import normalize_email, ResearchOptions, ResearchQuestion, RunDetail, RunList, SharedReport
@@ -89,6 +90,7 @@ class ScheduleRequest(BaseModel):
     topic: str = Field(min_length=3, max_length=2_000)
     frequency: str = "weekly"
     max_iterations: int | None = Field(default=None, ge=1, le=8)
+    options: ResearchOptions | None = None
 
     @field_validator("topic")
     @classmethod
@@ -104,6 +106,32 @@ class ScheduleRequest(BaseModel):
         if value not in SCHEDULE_PERIODS:
             raise ValueError("Frequency must be daily, weekly or monthly.")
         return value
+
+
+MAX_TEMPLATES = 20
+
+
+class TemplateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    topic: str = Field(default="", max_length=2_000)
+    options: ResearchOptions = Field(default_factory=ResearchOptions)
+
+    @field_validator("name", "topic")
+    @classmethod
+    def trim_text(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        if not value:
+            raise ValueError("Give the template a name.")
+        return value
+
+
+def stored_options(options: ResearchOptions | None) -> dict[str, Any]:
+    """Options worth keeping for later runs: pasted PDF text is never stored."""
+    return (options or ResearchOptions()).model_dump(mode="json", exclude={"documents"})
 
 
 class SchedulePatch(BaseModel):
@@ -831,6 +859,10 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
                     detail="Could not read any of the links you provided. Check they are public pages, or remove them.",
                 )
             provided = [found]
+        if options.documents:
+            uploaded = finding_from_documents([d.model_dump() for d in options.documents], body.topic)
+            if uploaded is not None:
+                provided.append(uploaded)
         if user_id is not None:
             try:
                 await asyncio.to_thread(get_store().record_run, thread_id, user_id, body.topic)
@@ -841,9 +873,27 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
             "findings": provided,
             "iteration": 0,
             "max_iterations": body.max_iterations or active_settings.max_iterations,
-            "options": options.model_dump(mode="json", exclude={"urls"}),
+            "options": options.model_dump(mode="json", exclude={"urls", "documents"}),
         }
         return limited_stream(graph, graph_input, config, thread_id, user_id=user_id)
+
+    @app.post("/research/uploads/pdf")
+    async def upload_pdf(request: Request, name: str = "document.pdf") -> dict[str, Any]:
+        """Read a PDF sent as the raw request body and return its text for use as a source."""
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > MAX_PDF_BYTES:
+            raise HTTPException(status_code=413, detail="That PDF is larger than 5 MB.")
+        data = bytearray()
+        async for chunk in request.stream():
+            data.extend(chunk)
+            if len(data) > MAX_PDF_BYTES:
+                raise HTTPException(status_code=413, detail="That PDF is larger than 5 MB.")
+        try:
+            text = await asyncio.to_thread(extract_pdf_text, bytes(data))
+        except DocumentError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        label = re.sub(r"[^\w .()\-]", "", name.strip())[:120] or "document.pdf"
+        return {"name": label, "chars": len(text), "text": text}
 
     @app.get("/research/runs", response_model=RunList)
     async def list_runs(request: Request) -> dict[str, Any]:
@@ -1069,6 +1119,8 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
         start_input = {
             "topic": schedule["topic"], "findings": [], "iteration": 0,
             "max_iterations": schedule.get("depth") or active.max_iterations,
+            # Saved options apply to every run; links are not re-read, so they are left out.
+            "options": {k: v for k, v in (schedule.get("options") or {}).items() if k not in {"urls", "documents"}},
         }
 
         async def drain(response: StreamingResponse) -> list[tuple[str, dict[str, Any]]]:
@@ -1180,9 +1232,30 @@ def create_app(*, graph: Any | None = None, settings: Settings | None = None) ->
                 detail=f"You can keep up to {current.max_schedules_per_user} recurring researches. Delete one to add another.",
             )
         row = await asyncio.to_thread(
-            get_store().create_schedule, user_id, body.topic, body.frequency, body.max_iterations, _next_run(body.frequency)
+            get_store().create_schedule, user_id, body.topic, body.frequency, body.max_iterations, _next_run(body.frequency),
+            stored_options(body.options) if body.options else None,
         )
         return public_schedule(row)
+
+    @app.get("/research/templates")
+    async def list_templates(request: Request) -> dict[str, Any]:
+        user_id = schedule_owner(request)
+        return {"templates": await asyncio.to_thread(get_store().list_templates, user_id), "limit": MAX_TEMPLATES}
+
+    @app.post("/research/templates", status_code=201)
+    async def create_template(body: TemplateRequest, request: Request) -> dict[str, Any]:
+        user_id = schedule_owner(request)
+        store = get_store()
+        if await asyncio.to_thread(store.count_templates, user_id) >= MAX_TEMPLATES:
+            raise HTTPException(status_code=409, detail=f"You can keep up to {MAX_TEMPLATES} templates. Delete one to add another.")
+        return await asyncio.to_thread(store.create_template, user_id, body.name, body.topic, stored_options(body.options))
+
+    @app.delete("/research/templates/{template_id}", status_code=204)
+    async def delete_template(template_id: str, request: Request) -> Response:
+        user_id = schedule_owner(request)
+        if not await asyncio.to_thread(get_store().delete_template, template_id, user_id):
+            raise HTTPException(status_code=404, detail="Template not found.")
+        return Response(status_code=204)
 
     @app.patch("/research/schedules/{schedule_id}")
     async def patch_schedule(schedule_id: str, body: SchedulePatch, request: Request) -> dict[str, Any]:

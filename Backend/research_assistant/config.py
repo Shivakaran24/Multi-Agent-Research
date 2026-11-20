@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     groq_api_key: SecretStr | None = None
     groq_model: str = "openai/gpt-oss-20b"
     groq_eval_model: str | None = None
+    # Optional second Groq model used when the main one is rate limited (Groq limits are per model),
+    # e.g. llama-3.3-70b-versatile. Empty disables the fallback.
+    groq_fallback_model: str | None = None
     tavily_api_key: SecretStr | None = None
     # Optional legacy shared token (scripts/CI). Normal users sign in with an account instead.
     require_email_verification: bool = False

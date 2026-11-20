@@ -1,4 +1,5 @@
 import { useEffect, useMemo } from 'react'
+import SourceLink from './SourceLink'
 import { buildReportView, hostOf } from './report'
 import { SAMPLE_REPORT, SAMPLE_TOPIC } from './sample'
 
@@ -17,7 +18,7 @@ export default function SampleReport({ onClose }: { onClose: () => void }) {
       <h2 id="sample-title" className="sample-topic">{SAMPLE_TOPIC}</h2>
       <p className="sample-note">Written by hand from public sources to show the output format. A real run searches fresh sources for your own topic.</p>
       <article className="markdown" dangerouslySetInnerHTML={{ __html: view.html }} />
-      {view.sources.length > 0 && <section className="sources" aria-label="Sources"><h3>Sources</h3><ol>{view.sources.map(source => <li key={source.n} value={source.n}><a href={source.url} target="_blank" rel="noopener noreferrer">{source.title}</a><small>{hostOf(source.url)}</small></li>)}</ol></section>}
+      {view.sources.length > 0 && <section className="sources" aria-label="Sources"><h3>Sources</h3><ol>{view.sources.map(source => <li key={source.n} value={source.n}><SourceLink source={source} /><small>{hostOf(source.url)}</small></li>)}</ol></section>}
     </section>
   </div>
 }

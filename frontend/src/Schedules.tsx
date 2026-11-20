@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { hasCustomOptions, toStoredOptions, type Options } from './options'
 import { createSchedule, deleteSchedule, listSchedules, runScheduleNow, setScheduleEnabled, type Frequency, type Schedule } from './runs'
 
 const LABEL: Record<Frequency, string> = { daily: 'Every day', weekly: 'Every week', monthly: 'Every month' }
@@ -10,7 +11,7 @@ function when(iso: string | null): string {
 }
 
 /** Recurring research: re-run a topic on a schedule and get each new brief by email. */
-export default function Schedules({ token, onClose, onOpenRun, onChanged }: { token: string; onClose: () => void; onOpenRun: (id: string) => void; onChanged: () => void }) {
+export default function Schedules({ token, onClose, onOpenRun, onChanged, options }: { token: string; onClose: () => void; onOpenRun: (id: string) => void; onChanged: () => void; options?: Options }) {
   const [items, setItems] = useState<Schedule[]>([])
   const [limit, setLimit] = useState(0)
   const [loaded, setLoaded] = useState(false)
@@ -19,6 +20,8 @@ export default function Schedules({ token, onClose, onOpenRun, onChanged }: { to
   const [error, setError] = useState('')
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
+  const [useOptions, setUseOptions] = useState(true)
+  const custom = !!options && hasCustomOptions(options)
 
   const load = useCallback(async () => {
     try { const data = await listSchedules(token); setItems(data.schedules); setLimit(data.limit); setError('') } catch (e) { setError(e instanceof Error ? e.message : 'Could not load schedules.') } finally { setLoaded(true) }
@@ -39,7 +42,7 @@ export default function Schedules({ token, onClose, onOpenRun, onChanged }: { to
   const add = (event: FormEvent) => {
     event.preventDefault()
     if (topic.trim().length < 3) return setError('Describe what to research (at least 3 characters).')
-    void act(async () => { await createSchedule(token, topic.trim(), frequency); setTopic('') }, 'Scheduled. The first run happens after one full period; use “Run now” to try it immediately.')
+    void act(async () => { await createSchedule(token, topic.trim(), frequency, custom && useOptions && options ? toStoredOptions(options) : undefined); setTopic('') }, 'Scheduled. The first run happens after one full period; use “Run now” to try it immediately.')
   }
 
   return <div className="modal-backdrop" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
@@ -69,6 +72,7 @@ export default function Schedules({ token, onClose, onOpenRun, onChanged }: { to
       {loaded && items.length < limit && <form className="schedule-form" onSubmit={add}>
         <label htmlFor="schedule-topic">New recurring research</label>
         <input id="schedule-topic" maxLength={2000} placeholder="e.g. Latest developments in grid-scale batteries" value={topic} onChange={e => setTopic(e.target.value)} />
+        {custom && <label className="options-check"><input type="checkbox" checked={useOptions} onChange={e => setUseOptions(e.target.checked)} /> Use the options currently set in the composer <small>style, audience, length, language, time window</small></label>}
         <div className="schedule-form-row">
           <select aria-label="How often" value={frequency} onChange={e => setFrequency(e.target.value as Frequency)}>
             {(Object.keys(LABEL) as Frequency[]).map(f => <option key={f} value={f}>{LABEL[f]}</option>)}

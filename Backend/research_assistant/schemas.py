@@ -69,6 +69,21 @@ class ResearchPlan(BaseModel):
 _LANGUAGE_RE = re.compile(r"^[A-Za-z][A-Za-z .()'-]{1,39}$")
 
 
+class UserDocument(BaseModel):
+    """Text extracted from a PDF the user uploaded (see POST /research/uploads/pdf)."""
+
+    name: str = Field(min_length=1, max_length=120)
+    text: str = Field(min_length=1, max_length=30_000)
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str) -> str:
+        value = re.sub(r"[^\w .()\-]", "", value.strip())
+        if not value:
+            raise ValueError("Document name is not valid.")
+        return value
+
+
 class ResearchOptions(BaseModel):
     """Per-run choices that shape how a brief is researched and written."""
 
@@ -79,6 +94,7 @@ class ResearchOptions(BaseModel):
     time_range: Literal["day", "week", "month", "year"] | None = None
     urls: list[str] = Field(default_factory=list, max_length=5)
     notes: str = Field(default="", max_length=6_000)
+    documents: list[UserDocument] = Field(default_factory=list, max_length=3)
     verify_claims: bool | None = None  # None = use the server default
 
     @field_validator("language")

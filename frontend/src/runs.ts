@@ -72,8 +72,29 @@ export async function listSchedules(token: string): Promise<{ schedules: Schedul
   return (await call('/research/schedules', token)).json() as Promise<{ schedules: Schedule[]; limit: number }>
 }
 
-export async function createSchedule(token: string, topic: string, frequency: Frequency): Promise<Schedule> {
-  return (await call('/research/schedules', token, { method: 'POST', body: JSON.stringify({ topic, frequency }) })).json() as Promise<Schedule>
+export async function createSchedule(token: string, topic: string, frequency: Frequency, options?: object): Promise<Schedule> {
+  return (await call('/research/schedules', token, { method: 'POST', body: JSON.stringify({ topic, frequency, ...(options ? { options } : {}) }) })).json() as Promise<Schedule>
+}
+
+export type Template = { id: string; name: string; topic: string; options: Record<string, unknown> }
+
+export async function listTemplates(token: string): Promise<Template[]> {
+  return ((await (await call('/research/templates', token)).json()) as { templates: Template[] }).templates
+}
+
+export async function saveTemplate(token: string, name: string, topic: string, options: object): Promise<Template> {
+  return (await call('/research/templates', token, { method: 'POST', body: JSON.stringify({ name, topic, options }) })).json() as Promise<Template>
+}
+
+export async function deleteTemplate(token: string, id: string): Promise<void> {
+  await call(`/research/templates/${encodeURIComponent(id)}`, token, { method: 'DELETE' })
+}
+
+export type UploadedPdf = { name: string; chars: number; text: string }
+
+export async function uploadPdf(token: string, file: File): Promise<UploadedPdf> {
+  const response = await call(`/research/uploads/pdf?name=${encodeURIComponent(file.name)}`, token, { method: 'POST', body: file, headers: { 'Content-Type': 'application/pdf' } })
+  return response.json() as Promise<UploadedPdf>
 }
 
 export async function setScheduleEnabled(token: string, id: string, enabled: boolean): Promise<Schedule> {

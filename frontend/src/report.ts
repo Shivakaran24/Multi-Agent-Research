@@ -1,6 +1,6 @@
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
-import { hostOf, linkCitations, splitReport, type SourceRef } from './citations'
+import { hostOf, isWebUrl, linkCitations, splitReport, type SourceRef } from './citations'
 
 export { hostOf, linkCitations, splitReport }
 export type { SourceRef }
@@ -27,7 +27,7 @@ const escapeHtml = (text: string) => text.replace(/[&<>"']/g, c => ({ '&': '&amp
 /** A self-contained document that opens cleanly in a browser or Word. */
 export function standaloneHtml(title: string, view: ReportView): string {
   const sources = view.sources.length
-    ? `<h2>Sources</h2><ol>${view.sources.map(s => `<li value="${s.n}"><a href="${escapeHtml(s.url)}">${escapeHtml(s.title)}</a> <small>${escapeHtml(hostOf(s.url))}</small></li>`).join('')}</ol>`
+    ? `<h2>Sources</h2><ol>${view.sources.map(s => `<li value="${s.n}">${isWebUrl(s.url) ? `<a href="${escapeHtml(s.url)}">${escapeHtml(s.title)}</a>` : escapeHtml(s.title)} <small>${escapeHtml(hostOf(s.url))}</small></li>`).join('')}</ol>`
     : ''
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title><style>body{font:16px/1.65 Georgia,serif;max-width:760px;margin:40px auto;padding:0 20px;color:#222}h1,h2,h3{line-height:1.25}a{color:#2b694a}small{color:#777}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:6px 8px}</style></head><body>${view.html}${sources}</body></html>`
 }

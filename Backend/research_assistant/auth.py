@@ -212,6 +212,14 @@ _SCHEMA = (
         last_status TEXT,
         created_at TEXT NOT NULL
     )""",
+    """CREATE TABLE IF NOT EXISTS templates (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        name TEXT NOT NULL,
+        topic TEXT NOT NULL DEFAULT '',
+        options TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
     """CREATE TABLE IF NOT EXISTS email_tokens (
         token_hash TEXT PRIMARY KEY,
         user_id TEXT NOT NULL REFERENCES users(id),
@@ -234,6 +242,7 @@ _MIGRATIONS = (
     ("research_runs", "tokens_used", "INTEGER NOT NULL DEFAULT 0"),
     ("research_runs", "schedule_id", "TEXT"),
     ("research_runs", "tags", "TEXT"),
+    ("schedules", "options", "TEXT"),
 )
 
 _USER_COLUMNS = "id, email, full_name, password_hash, created_at, token_version, email_verified"
@@ -357,6 +366,7 @@ class UserStore:
             conn.execute(self._sql("DELETE FROM password_resets WHERE user_id = ?"), (user_id,))
             conn.execute(self._sql("DELETE FROM email_tokens WHERE user_id = ?"), (user_id,))
             conn.execute(self._sql("DELETE FROM schedules WHERE user_id = ?"), (user_id,))
+            conn.execute(self._sql("DELETE FROM templates WHERE user_id = ?"), (user_id,))
             conn.execute(self._sql("DELETE FROM research_runs WHERE user_id = ?"), (user_id,))
             conn.execute(self._sql("DELETE FROM users WHERE id = ?"), (user_id,))
         return threads
@@ -597,26 +607,33 @@ class UserStore:
     # ---- recurring research
 
     _SCHEDULE_COLUMNS = (
-        "id, user_id, topic, frequency, depth, enabled, next_run_at, last_run_at, last_thread_id, last_status, created_at"
+        "id, user_id, topic, frequency, depth, enabled, next_run_at, last_run_at, last_thread_id, last_status, created_at, options"
     )
 
     @staticmethod
     def _schedule(row: Any) -> dict[str, Any]:
         keys = ("id", "user_id", "topic", "frequency", "depth", "enabled", "next_run_at",
-                "last_run_at", "last_thread_id", "last_status", "created_at")
+                "last_run_at", "last_thread_id", "last_status", "created_at", "options")
         data = dict(zip(keys, row, strict=True))
         data["enabled"] = bool(data["enabled"])
+        try:
+            data["options"] = json.loads(data["options"]) if data["options"] else None
+        except ValueError:
+            data["options"] = None
         return data
 
-    def create_schedule(self, user_id: str, topic: str, frequency: str, depth: int | None, first_run_at: str) -> dict[str, Any]:
+    def create_schedule(
+        self, user_id: str, topic: str, frequency: str, depth: int | None, first_run_at: str, options: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         schedule_id = str(uuid.uuid4())
         with self._connect() as conn:
             conn.execute(
                 self._sql(
-                    "INSERT INTO schedules (id, user_id, topic, frequency, depth, enabled, next_run_at, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, 1, ?, ?)"
+                    "INSERT INTO schedules (id, user_id, topic, frequency, depth, enabled, next_run_at, created_at, options) "
+                    "VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)"
                 ),
-                (schedule_id, user_id, topic[:2_000], frequency, depth, first_run_at, _now()),
+                (schedule_id, user_id, topic[:2_000], frequency, depth, first_run_at, _now(),
+                 json.dumps(options) if options else None),
             )
         found = self.get_schedule(schedule_id, user_id)
         assert found is not None
@@ -658,6 +675,44 @@ class UserStore:
             return conn.execute(
                 self._sql("DELETE FROM schedules WHERE id = ? AND user_id = ?"), (schedule_id, user_id)
             ).rowcount == 1
+
+    # --- saved research templates -------------------------------------------------
+
+    @staticmethod
+    def _template(row: Any) -> dict[str, Any]:
+        data = dict(zip(("id", "name", "topic", "options", "created_at"), row, strict=True))
+        try:
+            data["options"] = json.loads(data["options"])
+        except ValueError:
+            data["options"] = {}
+        return data
+
+    def list_templates(self, user_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                self._sql("SELECT id, name, topic, options, created_at FROM templates WHERE user_id = ? ORDER BY created_at"),
+                (user_id,),
+            ).fetchall()
+        return [self._template(row) for row in rows]
+
+    def create_template(self, user_id: str, name: str, topic: str, options: dict[str, Any]) -> dict[str, Any]:
+        template_id = str(uuid.uuid4())
+        created = _now()
+        with self._connect() as conn:
+            conn.execute(
+                self._sql("INSERT INTO templates (id, user_id, name, topic, options, created_at) VALUES (?, ?, ?, ?, ?, ?)"),
+                (template_id, user_id, name[:60], topic[:2_000], json.dumps(options), created),
+            )
+        return {"id": template_id, "name": name[:60], "topic": topic[:2_000], "options": options, "created_at": created}
+
+    def delete_template(self, template_id: str, user_id: str) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(self._sql("DELETE FROM templates WHERE id = ? AND user_id = ?"), (template_id, user_id))
+            return cursor.rowcount > 0
+
+    def count_templates(self, user_id: str) -> int:
+        with self._connect() as conn:
+            return int(conn.execute(self._sql("SELECT COUNT(*) FROM templates WHERE user_id = ?"), (user_id,)).fetchone()[0])
 
     def count_schedules(self, user_id: str) -> int:
         with self._connect() as conn:

@@ -192,3 +192,9 @@ Results are filtered by `BLOCKED_DOMAINS` / `PREFERRED_DOMAINS`. With `CLAIM_CHE
 ## Frontend tests
 
 `cd frontend && npm test` (Node 22.6+). Add `npm test` as a CI step next to `ruff check .`.
+
+## PDF upload, templates and model fallback
+
+- `POST /research/uploads/pdf?name=file.pdf` takes the raw PDF as the request body (max 5 MB, `pypdf` extracts the text) and returns `{name, chars, text}`. The client sends that text back in `options.documents` (max 3) when it starts a run. The text is never stored with the run, template or schedule; the brief cites it as an uploaded file.
+- `GET/POST /research/templates` and `DELETE /research/templates/{id}` manage up to 20 saved option sets per user. `POST /research/schedules` accepts an `options` object that every scheduled run reuses (links and documents are not re-read).
+- `GROQ_FALLBACK_MODEL` enables a second model: when the main one returns HTTP 429, the call is retried on the fallback model right away (other errors keep the normal retry path).

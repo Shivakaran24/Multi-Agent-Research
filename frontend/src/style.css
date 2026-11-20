@@ -81,3 +81,5 @@
 
 html[data-theme=dark]{background:#0f1210;filter:invert(.92) hue-rotate(180deg);color-scheme:dark}html[data-theme=dark] img,html[data-theme=dark] video,html[data-theme=dark] iframe,html[data-theme=dark] .brand-logo{filter:invert(1) hue-rotate(180deg)}
 @media(max-width:600px){.topbar{flex-wrap:wrap;gap:8px}.modal,.admin-modal{width:calc(100vw - 24px);max-width:none}table{display:block;overflow-x:auto}.report-actions{flex-wrap:wrap}input,select,textarea{font-size:16px}}
+.template-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}.template-row select,.template-row input{flex:1 1 180px;min-width:0}
+.pdf-row{display:flex;gap:10px;align-items:center;margin-top:6px}.pdf-list{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:4px}.pdf-list li{display:flex;justify-content:space-between;gap:10px;font-size:.9rem}

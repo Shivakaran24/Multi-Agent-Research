@@ -1,6 +1,6 @@
 export type SourceRef = { n: number; title: string; url: string }
 
-const SOURCE_LINE = /^\[(\d+)\]\s+(.*)\s+—\s+(https?:\/\/\S+)\s*$/
+const SOURCE_LINE = /^\[(\d+)\]\s+(.*)\s+—\s+(https?:\/\/\S+|upload:.+?)\s*$/
 
 /** The writer appends "## Sources" with lines like `[1] Title — https://…`; split that off. */
 export function splitReport(markdown: string): { body: string; sources: SourceRef[] } {
@@ -19,11 +19,15 @@ export function linkCitations(body: string, sources: SourceRef[]): string {
   const byNumber = new Map(sources.map(source => [source.n, source.url]))
   return body.replace(/\[(\d+)\](?!\()/g, (whole, digits: string) => {
     const url = byNumber.get(Number(digits))
-    return url ? `[[${digits}]](${url.replace(/\(/g, '%28').replace(/\)/g, '%29')})` : whole
+    return url && isWebUrl(url) ? `[[${digits}]](${url.replace(/\(/g, '%28').replace(/\)/g, '%29')})` : whole
   })
 }
 
+/** Uploaded documents are listed as `upload:<file name>`; only real web addresses can be linked. */
+export const isWebUrl = (url: string) => /^https?:\/\//i.test(url)
+
 export function hostOf(url: string): string {
+  if (url.startsWith('upload:')) return 'uploaded file'
   try { return new URL(url).hostname.replace(/^www\./, '') } catch { return '' }
 }
 

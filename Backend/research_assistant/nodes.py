@@ -27,7 +27,7 @@ from research_assistant.schemas import (
 )
 from research_assistant.state import ResearcherWorkerState, ResearchState
 
-SearchFn = Callable[[str], list[dict[str, Any]]]
+SearchFn = Callable[..., list[dict[str, Any]]]
 NodeFn = Callable[[Any], dict[str, Any]]
 
 
@@ -98,6 +98,22 @@ def _with_structured_output(model: Any, schema: Any) -> Any:
         return model.with_structured_output(schema, method="json_schema", strict=strict)
     except Exception:
         return model.with_structured_output(schema)
+
+
+def _rate_limit_errors() -> tuple[type[BaseException], ...]:
+    try:
+        from groq import RateLimitError
+    except ImportError:  # pragma: no cover - groq ships with langchain-groq
+        return ()
+    return (RateLimitError,)
+
+
+def with_fallback(structured: Any, fallback_structured: Any | None) -> Any:
+    """Switch to the fallback model as soon as the main one answers HTTP 429."""
+    errors = _rate_limit_errors()
+    if fallback_structured is None or not errors or not hasattr(structured, "with_fallbacks"):
+        return structured
+    return structured.with_fallbacks([fallback_structured], exceptions_to_handle=errors)
 
 
 _invoke_with_rate_limit_retry = invoke_with_retry  # retries 429s and malformed JSON; see llm_retry.py
@@ -193,6 +209,33 @@ def create_node_implementations(
             **reasoning_options,
         )
     fast_llm = fast_llm or llm
+    fallback_llm = fallback_fast_llm = None
+    if using_default_model and settings.groq_fallback_model and settings.groq_fallback_model != settings.groq_model:
+        fallback_options = (
+            {"reasoning_effort": "low", "reasoning_format": "hidden"}
+            if settings.groq_fallback_model in {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
+            else {}
+        )
+        fallback_llm = ChatGroq(
+            model=settings.groq_fallback_model,
+            api_key=settings.groq_api_key.get_secret_value(),
+            max_tokens=settings.groq_max_output_tokens,
+            **fallback_options,
+        )
+        fallback_fast_llm = ChatGroq(
+            model=settings.groq_fallback_model,
+            api_key=settings.groq_api_key.get_secret_value(),
+            max_tokens=settings.groq_summary_max_tokens,
+            **fallback_options,
+        )
+
+    def structured(model: Any, schema: Any) -> Any:
+        """Structured-output runnable for `model`, falling back to the second model on rate limits."""
+        fallback = fallback_llm if model is llm else fallback_fast_llm if model is fast_llm else None
+        return with_fallback(
+            _with_structured_output(model, schema),
+            _with_structured_output(fallback, schema) if fallback is not None else None,
+        )
 
     if search is None:
         if not settings.tavily_api_key:
@@ -225,7 +268,7 @@ def create_node_implementations(
         if state.get("gaps"):
             questions = state["gaps"]
         else:
-            planner = _with_structured_output(llm, ResearchPlan)
+            planner = structured(llm, ResearchPlan)
             plan = _invoke_with_rate_limit_retry(
                 planner,
                 [
@@ -283,7 +326,7 @@ def create_node_implementations(
             f"{source.title} ({source.url}): {source.content or source.snippet}"
             for source in sources
         ) or "No usable search results were returned."
-        summarizer = _with_structured_output(fast_llm, ResearchSummary)
+        summarizer = structured(fast_llm, ResearchSummary)
         summary = _invoke_with_rate_limit_retry(
             summarizer,
             [
@@ -312,7 +355,7 @@ def create_node_implementations(
             f"Sources: {[str(source.url) for source in finding.sources[:4]]}"
             for finding in state.get("findings", [])
         )
-        reviewer = _with_structured_output(llm, ReviewDecision)
+        reviewer = structured(llm, ReviewDecision)
         decision = _invoke_with_rate_limit_retry(
             reviewer,
             [
@@ -343,7 +386,7 @@ def create_node_implementations(
         """Synthesize findings into a report and append a deterministic source list."""
         evidence, bibliography = _citation_context(state.get("findings", []))
         options = state.get("options") or {}
-        writer = _with_structured_output(llm, FinalReport)
+        writer = structured(llm, FinalReport)
         notes = str(options.get("notes") or "")[:3000]
         report = _invoke_with_rate_limit_retry(
             writer,
@@ -364,7 +407,7 @@ def create_node_implementations(
         markdown = sanitize_citations(report.markdown, source_count)
         verify = options.get("verify_claims")
         if (settings.claim_check if verify is None else verify) and state.get("findings"):
-            markdown, _ = check_claims(markdown, state["findings"], _with_structured_output(fast_llm, ClaimCheck))
+            markdown, _ = check_claims(markdown, state["findings"], structured(fast_llm, ClaimCheck))
 
         sources = bibliography or "No web sources were returned."
         return {"report": f"# {title}\n\n{markdown}\n\n## Sources\n\n{sources}"}
